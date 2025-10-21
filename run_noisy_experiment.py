@@ -17,21 +17,31 @@ import re
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 import os
+import gc
 
-def setup_model_and_tokenizer(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
+def setup_model_and_tokenizer(model_name: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cpu"):
     """Initialize model and add special tokens."""
     print(f"Loading {model_name}...")
-    
+    print(f"Target device: {device}")
+
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
         use_fast=True
     )
-    
+
+    # Use appropriate dtype and device based on availability
+    if device == "cuda" and torch.cuda.is_available():
+        dtype = torch.float16  # Use FP16 for GPU efficiency
+        device_map = "auto"
+    else:
+        dtype = torch.float32  # Use FP32 for CPU
+        device_map = "cpu"
+
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float32,  # Use FP32 for CPU
-        device_map="cpu",
+        torch_dtype=dtype,
+        device_map=device_map,
         trust_remote_code=True
     )
     
@@ -143,13 +153,13 @@ def test_question_with_noise(
     device: str = 'cpu'
 ) -> Dict[str, Any]:
     """Test a single question with specific noise scale."""
-    
+
     coconut_model.eval()
-    
+
     input_ids = create_coconut_input(tokenizer, question, start_latent_id, end_latent_id)
     original_input_ids = input_ids.clone()
     input_ids = input_ids.to(device)
-    
+
     with torch.no_grad():
         try:
             generated_ids = coconut_model.generate(
@@ -158,21 +168,36 @@ def test_question_with_noise(
                 max_new_tokens=max_new_tokens,
                 noise_scale=noise_scale
             )
-            
+
             generated_text = extract_generated_only(
-                tokenizer, 
-                generated_ids, 
-                original_input_ids, 
+                tokenizer,
+                generated_ids,
+                original_input_ids,
                 end_latent_id
             )
-            
-            return {
+
+            result = {
                 "success": True,
                 "generated_text": generated_text,
                 "error": None
             }
-            
+
+            # Clean up tensors immediately to free memory
+            del input_ids, original_input_ids, generated_ids
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+            return result
+
         except Exception as e:
+            # Clean up on error
+            if 'input_ids' in locals():
+                del input_ids
+            if 'original_input_ids' in locals():
+                del original_input_ids
+            if 'generated_ids' in locals():
+                del generated_ids
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
             return {
                 "success": False,
                 "generated_text": "",
@@ -184,7 +209,7 @@ def run_full_experiment(
     num_questions: int = None,  # None = full dataset
     noise_scales: List[float] = None,
     max_new_tokens: int = 100,
-    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
     save_interval: int = 50,
     output_dir: str = "coconut_results"
 ) -> Dict[str, Any]:
@@ -192,19 +217,23 @@ def run_full_experiment(
     
     if noise_scales is None:
         noise_scales = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
-    
+
+
     os.makedirs(output_dir, exist_ok=True)
-    device = 'cpu'
-    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     print("="*70)
     print("COCONUT FULL GSM8K NOISE EXPERIMENT")
     print("="*70)
     print(f"Noise scales: {noise_scales}")
     print(f"Device: {device}")
     print(f"Model: {model_name}")
-    
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+
     # Setup
-    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model_and_tokenizer(model_name)
+    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model_and_tokenizer(model_name, device)
     
     coconut_model = Coconut(
         base_causallm=base_model,
@@ -267,14 +296,15 @@ def run_full_experiment(
                 generated_answer = extract_numerical_answer(result["generated_text"])
                 expected_answer = extract_numerical_answer(q_data["answer"])
                 is_correct = generated_answer == expected_answer
-                
+
                 # Update accuracy tracking
                 results["accuracy_by_noise"][str(noise_scale)]["total"] += 1
                 if is_correct:
                     results["accuracy_by_noise"][str(noise_scale)]["correct"] += 1
-                
+
                 question_results["noise_tests"].append({
                     "noise_scale": noise_scale,
+                    "generated_text": result["generated_text"],
                     "generated_answer": generated_answer,
                     "expected_answer": expected_answer,
                     "is_correct": is_correct,
@@ -284,6 +314,7 @@ def run_full_experiment(
                 results["accuracy_by_noise"][str(noise_scale)]["total"] += 1
                 question_results["noise_tests"].append({
                     "noise_scale": noise_scale,
+                    "generated_text": "",
                     "generated_answer": None,
                     "expected_answer": extract_numerical_answer(q_data["answer"]),
                     "is_correct": False,
@@ -292,7 +323,12 @@ def run_full_experiment(
                 })
         
         results["questions"].append(question_results)
-        
+
+        # Periodic memory cleanup
+        if (q_idx + 1) % 10 == 0:
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
         # Save intermediate results
         if (q_idx + 1) % save_interval == 0:
             # Calculate accuracies
@@ -472,7 +508,7 @@ def main():
     
     NOISE_SCALES = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
     MAX_NEW_TOKENS = 100
-    MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+    MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
     OUTPUT_DIR = "coconut_full_results"
     SAVE_INTERVAL = 50  # Save checkpoint every N questions
     

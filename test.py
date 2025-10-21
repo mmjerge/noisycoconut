@@ -14,9 +14,8 @@ from typing import List, Dict, Any
 import re
 
 def setup_model_and_tokenizer(model_name: str = "Qwen/Qwen3-0.6B"):
-    """Initialize Llama 3.1 8B Instruct model and add special tokens."""
+    """Initialize model and add special tokens."""
     print(f"Loading {model_name}...")
-    print("Note: You may need to authenticate with Hugging Face and accept the Llama license.")
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -29,7 +28,7 @@ def setup_model_and_tokenizer(model_name: str = "Qwen/Qwen3-0.6B"):
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,  # Use FP16 for efficiency
-        device_map="cpu",  # Automatically handle device placement
+        device_map="auto",  # Automatically handle device placement
         trust_remote_code=True
     )
     
@@ -140,8 +139,7 @@ def extract_numerical_answer(text: str) -> str:
 
 
 def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int):
-    """Create input for Coconut model in TRUE METHOD format with Llama-style prompting."""
-    # Use Llama 3.1 Instruct format
+    """Create input for Coconut model with latent reasoning markers."""
     prompt = f"""<|begin_of_text|><|start_header_id|>user<|end_header_id|>
 
 {question}
@@ -216,18 +214,15 @@ def test_question_with_noise(
             
             # Extract ONLY the generated portion
             generated_text = extract_generated_only(
-                tokenizer, 
-                generated_ids, 
-                original_input_ids, 
+                tokenizer,
+                generated_ids,
+                original_input_ids,
                 end_latent_id
             )
-            
-            full_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            
+
             return {
                 "success": True,
                 "generated_text": generated_text,
-                "full_text": full_text,
                 "num_tokens": generated_ids.shape[1],
                 "num_new_tokens": generated_ids.shape[1] - original_input_ids.shape[1],
                 "error": None
@@ -237,7 +232,6 @@ def test_question_with_noise(
             return {
                 "success": False,
                 "generated_text": "",
-                "full_text": "",
                 "num_tokens": 0,
                 "num_new_tokens": 0,
                 "error": str(e)
@@ -256,9 +250,9 @@ def run_noise_experiment(
         noise_scales = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
+
     print("="*70)
-    print("COCONUT NOISE ROBUSTNESS EXPERIMENT - LLAMA 3.1 8B INSTRUCT")
+    print(f"COCONUT NOISE ROBUSTNESS EXPERIMENT - {model_name}")
     print("="*70)
     print(f"Testing {len(noise_scales)} noise scales on {num_questions} GSM8K questions")
     print(f"Noise scales: {noise_scales}")

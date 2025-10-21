@@ -245,13 +245,18 @@ class Coconut(nn.Module):
                 (input_ids.shape[1] if pass_idx + 1 >= max_n_latents else next_compute_range[1] + 1),
             )
 
+            # Extract last hidden layer (final transformer layer output)
+            # This is the "continuous thought" representation that gets fed back
             hidden_states: torch.Tensor = outputs.hidden_states[-1]
-            
+
+            # Step 4b: Apply noise to first pass (for robustness experiments)
+            # Note: This adds noise to the last hidden layer output of the FIRST latent pass
+            # in the continuous reasoning space, before it's fed back as input to the next pass
             if pass_idx == 0 and noise_scale > 0.0:
                 noise = torch.randn_like(hidden_states) * noise_scale
                 hidden_states = hidden_states + noise
-                print(f"  Applied noise with scale {noise_scale} to first pass hidden states")
-            
+                print(f"  Applied noise with scale {noise_scale} to first pass last hidden layer")
+
             kv_cache = outputs.past_key_values
 
             # Step 5: Replace latent embeddings
