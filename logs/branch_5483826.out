@@ -60833,3 +60833,273 @@ Testing noise=0.0 with 5 branches...
 
 === Branching Generation (N=5, noise=0.0) ===
 Step 1: First latent pass (with noise=0.0)...
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 181 new tokens
+  Branch 2/5... 170 new tokens
+  Branch 3/5... 183 new tokens
+  Branch 4/5... 163 new tokens
+  Branch 5/5... 172 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['', '13', '13', '13', '13']
+Vote distribution: {'': 1, '13': 4}
+
+Majority vote: 13
+Expected: 13
+Result: ✓ CORRECT
+
+Example output (Branch 1):
+  assistant
+
+To find the answer, let's break down the problem step by step.
+
+Step 1: Find half of the letters in Indras' name.
+Half of the letters in Indras' name is 6 / 2 = 3
+
+Step 2: Find out how many...
+
+----------------------------------------------------------------------
+Testing noise=0.2 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=0.2) ===
+Step 1: First latent pass (with noise=0.2)...
+  Applied noise: gaussian_scaled, scale=0.2
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 127 new tokens
+  Branch 2/5... 512 new tokens
+  Branch 3/5... 125 new tokens
+  Branch 4/5... 1 new tokens
+  Branch 5/5... 1 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['6', '2', '13', 'NO_ANSWER_FOUND', 'NO_ANSWER_FOUND']
+Vote distribution: {'6': 1, '2': 1, '13': 1, 'NO_ANSWER_FOUND': 2}
+
+Majority vote: NO_ANSWER_FOUND
+Expected: 13
+Result: ✗ INCORRECT
+
+Example output (Branch 1):
+  assistant
+
+Let's break down the problem into steps.
+
+1. The name 'Indras' has 6 letters.
+2. The sister has name with letters that is 4 more than half of letters in Indras name. Half of letters in Indr...
+
+----------------------------------------------------------------------
+Testing noise=0.5 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=0.5) ===
+Step 1: First latent pass (with noise=0.5)...
+  Applied noise: gaussian_scaled, scale=0.5
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 162 new tokens
+  Branch 2/5... 158 new tokens
+  Branch 3/5... 125 new tokens
+  Branch 4/5... 174 new tokens
+  Branch 5/5... 166 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['13', '13', '13', '13', '13']
+Vote distribution: {'13': 5}
+
+Majority vote: 13
+Expected: 13
+Result: ✓ CORRECT
+
+Example output (Branch 1):
+  assistant
+
+To find the solution, let's break down the problem step by step:
+
+Step 1: Find half the letters in Indras' name
+Indras has 6 letters. Half of 6 is 3.
+
+Step 2: Find the number of letters in ...
+
+----------------------------------------------------------------------
+Testing noise=1.0 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=1.0) ===
+Step 1: First latent pass (with noise=1.0)...
+  Applied noise: gaussian_scaled, scale=1.0
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 181 new tokens
+  Branch 2/5... 127 new tokens
+  Branch 3/5... 180 new tokens
+  Branch 4/5... 105 new tokens
+  Branch 5/5... 164 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['13', '', '13', '', '13']
+Vote distribution: {'13': 3, '': 2}
+
+Majority vote: 13
+Expected: 13
+Result: ✓ CORRECT
+
+Example output (Branch 1):
+  assistant
+
+To calculate the number of letters in Indras' sister's name, let's break it down step by step:
+
+1. Find half of the letters in Indras' name:
+Indras has 6 letters in her name. 
+Half of 6 is ...
+
+======================================================================
+Question 431/800
+======================================================================
+Q: Charlotte went into the kitchen supply store knowing she wanted a set of pot and pans for $120.00, a set of mixing bowls for $20.00 and 5 separate utensils at $5.00 each.  At check out, the clerk told her everything was 20% off.  How much was her order?
+
+Expected Answer: 132
+
+----------------------------------------------------------------------
+Testing noise=0.0 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=0.0) ===
+Step 1: First latent pass (with noise=0.0)...
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 190 new tokens
+  Branch 2/5... 240 new tokens
+  Branch 3/5... 211 new tokens
+  Branch 4/5... 239 new tokens
+  Branch 5/5... 188 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['00', '00', '00', '00', '00']
+Vote distribution: {'00': 5}
+
+Majority vote: 00
+Expected: 132
+Result: ✗ INCORRECT
+
+Example output (Branch 1):
+  assistant
+
+To find the total cost of Charlotte's order, we will calculate it step by step.
+
+Step 1: Calculate the total cost of the items before the discount.
+- Pot and pans: $120.00
+- Mixing bowls: $...
+
+----------------------------------------------------------------------
+Testing noise=0.2 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=0.2) ===
+Step 1: First latent pass (with noise=0.2)...
+  Applied noise: gaussian_scaled, scale=0.2
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 167 new tokens
+  Branch 2/5... 232 new tokens
+  Branch 3/5... 160 new tokens
+  Branch 4/5... 163 new tokens
+  Branch 5/5... 162 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['50', '80', '00', '00', '00']
+Vote distribution: {'50': 1, '80': 1, '00': 3}
+
+Majority vote: 00
+Expected: 132
+Result: ✗ INCORRECT
+
+Example output (Branch 1):
+  To calculate the total cost, we will break down the items into their individual costs, then apply the discount. 
+
+1. Pot and pan set: $120.00
+2. Mixing bowl set: $20.00
+3. 5 utensils: $5.00 x 5 = $25....
+
+----------------------------------------------------------------------
+Testing noise=0.5 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=0.5) ===
+Step 1: First latent pass (with noise=0.5)...
+  Applied noise: gaussian_scaled, scale=0.5
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 231 new tokens
+  Branch 2/5... 218 new tokens
+  Branch 3/5... 160 new tokens
+  Branch 4/5... 211 new tokens
+  Branch 5/5... 230 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['00', '00', '00', '00', '00']
+Vote distribution: {'00': 5}
+
+Majority vote: 00
+Expected: 132
+Result: ✗ INCORRECT
+
+Example output (Branch 1):
+  assistant
+
+To solve this problem, we'll break it down step by step.
+
+Step 1: Calculate the total cost of the items without the discount.
+- The set of pot and pans costs $120.00.
+- The set of mixing bo...
+
+----------------------------------------------------------------------
+Testing noise=1.0 with 5 branches...
+----------------------------------------------------------------------
+
+=== Branching Generation (N=5, noise=1.0) ===
+Step 1: First latent pass (with noise=1.0)...
+  Applied noise: gaussian_scaled, scale=1.0
+Step 2: Branching into 5 paths for remaining 7 latent passes...
+Step 3: Final pass and autoregressive generation for each branch...
+  Branch 1/5... 170 new tokens
+  Branch 2/5... 165 new tokens
+  Branch 3/5... 172 new tokens
+  Branch 4/5... 211 new tokens
+  Branch 5/5... 235 new tokens
+=== Completed 5 branches ===
+
+
+✓ Generation successful!
+
+Branch answers: ['00', '00', '00', '00', '00']
+Vote distribution: {'00': 5}
+
+Majority vote: 00
+Expected: 132
+Result: ✗ INCORRECT
+
+Example output (Branch 1):
