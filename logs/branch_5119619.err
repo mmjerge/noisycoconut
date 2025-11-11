@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/sfs/weka/scratch/mj6ux/Projects/coconut/quick_branch_test.py", line 415, in <module>
+    run_quick_test()
+  File "/sfs/weka/scratch/mj6ux/Projects/coconut/quick_branch_test.py", line 284, in run_quick_test
+    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(MODEL_NAME)
+                                                                                           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sfs/weka/scratch/mj6ux/Projects/coconut/quick_branch_test.py", line 56, in setup_model
+    base_model = AutoModelForCausalLM.from_pretrained(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.conda/envs/coconut/lib/python3.12/site-packages/transformers/models/auto/auto_factory.py", line 573, in from_pretrained
+    return model_class.from_pretrained(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.conda/envs/coconut/lib/python3.12/site-packages/transformers/modeling_utils.py", line 272, in _wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.conda/envs/coconut/lib/python3.12/site-packages/transformers/modeling_utils.py", line 4401, in from_pretrained
+    model = cls(config, *model_args, **model_kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: LlamaForCausalLM.__init__() got an unexpected keyword argument 'dtype'

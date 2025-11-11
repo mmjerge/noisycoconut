@@ -1,16 +1,162 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union, Literal
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from collections import namedtuple
 from transformers.models.gpt2 import GPT2LMHeadModel
 from transformers import DynamicCache
+import torch.nn.functional as F
 
 Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 8
+
+
+def apply_noise_to_hidden_states(
+    hidden_states: torch.Tensor,
+    noise_scale: float,
+    noise_type: str = "gaussian",
+    noise_direction: Optional[str] = None
+) -> Tuple[torch.Tensor, dict]:
+    """
+    Apply different types of noise to hidden states for robustness testing.
+
+    Args:
+        hidden_states: The hidden state tensor to perturb. Shape: (batch, seq_len, hidden_dim)
+        noise_scale: Scale/magnitude of the noise to apply
+        noise_type: Type of noise distribution
+            - "gaussian": Standard Gaussian noise N(0, noise_scale^2)
+            - "gaussian_scaled": Gaussian noise scaled to match hidden state norm
+            - "snr": Signal-to-Noise Ratio based noise (noise_scale = SNR value)
+            - "uniform": Uniform noise in [-noise_scale, noise_scale]
+            - "orthogonal": Noise orthogonal to the hidden state direction
+            - "targeted": Noise in the direction of the hidden state (amplifies/dampens)
+        noise_direction: For directional noise types ("orthogonal", "targeted")
+            - "random_orthogonal": Random direction orthogonal to hidden states
+            - "opposite": Direction opposite to hidden states (for targeted)
+            - "same": Same direction as hidden states (for targeted)
+
+    Returns:
+        Tuple of (perturbed_hidden_states, noise_info_dict)
+        noise_info_dict contains diagnostic information about the noise applied
+    """
+    device = hidden_states.device
+    original_norm = torch.norm(hidden_states, dim=-1).mean().item()
+
+    noise_info = {
+        "noise_type": noise_type,
+        "noise_scale": noise_scale,
+        "original_norm": original_norm,
+    }
+
+    if noise_type == "gaussian":
+        noise = torch.randn_like(hidden_states) * noise_scale
+        perturbed = hidden_states + noise
+        noise_info["noise_norm"] = torch.norm(noise, dim=-1).mean().item()
+
+    elif noise_type == "gaussian_scaled":
+        noise = torch.randn_like(hidden_states)
+        noise_norm = torch.norm(noise, dim=-1, keepdim=True)
+        hidden_norm = torch.norm(hidden_states, dim=-1, keepdim=True)
+        scaled_noise = noise / (noise_norm + 1e-8) * hidden_norm * noise_scale
+        perturbed = hidden_states + scaled_noise
+        noise_info["noise_norm"] = torch.norm(scaled_noise, dim=-1).mean().item()
+        noise_info["scale_ratio"] = noise_scale
+
+    elif noise_type == "snr":
+        # Signal-to-Noise Ratio based noise
+        # noise_scale represents the desired SNR (Signal/Noise ratio)
+        # SNR = 10 means signal is 10x stronger than noise
+        # SNR = 1 means signal equals noise
+        # SNR = 0.1 means noise is 10x stronger than signal
+
+        # Calculate signal power (norm)
+        signal_norm = torch.norm(hidden_states, dim=-1, keepdim=True)
+
+        # Generate random Gaussian noise
+        noise = torch.randn_like(hidden_states)
+
+        # Calculate desired noise norm based on SNR
+        # SNR = signal_norm / noise_norm
+        # Therefore: noise_norm = signal_norm / SNR
+        if noise_scale > 0:
+            desired_noise_norm = signal_norm / noise_scale
+        else:
+            # If SNR = 0, use very large noise (infinite noise case)
+            desired_noise_norm = signal_norm * 1000.0
+
+        # Normalize and scale noise to desired magnitude
+        noise_norm = torch.norm(noise, dim=-1, keepdim=True)
+        scaled_noise = noise / (noise_norm + 1e-8) * desired_noise_norm
+
+        perturbed = hidden_states + scaled_noise
+
+        # Calculate actual SNR achieved
+        actual_noise_norm = torch.norm(scaled_noise, dim=-1, keepdim=True)
+        actual_snr = signal_norm / (actual_noise_norm + 1e-8)
+
+        noise_info["noise_norm"] = torch.norm(scaled_noise, dim=-1).mean().item()
+        noise_info["target_snr"] = noise_scale
+        noise_info["actual_snr"] = actual_snr.mean().item()
+        noise_info["signal_power"] = signal_norm.mean().item()
+        noise_info["noise_power"] = actual_noise_norm.mean().item()
+
+    elif noise_type == "uniform":
+        noise = (torch.rand_like(hidden_states) - 0.5) * 2 * noise_scale
+        perturbed = hidden_states + noise
+        noise_info["noise_norm"] = torch.norm(noise, dim=-1).mean().item()
+
+    elif noise_type == "orthogonal":
+        noise = torch.randn_like(hidden_states)
+
+        hidden_norm_sq = torch.sum(hidden_states * hidden_states, dim=-1, keepdim=True)
+        projection = (torch.sum(noise * hidden_states, dim=-1, keepdim=True) /
+                     (hidden_norm_sq + 1e-8)) * hidden_states
+        orthogonal_noise = noise - projection
+
+        orthogonal_noise_norm = torch.norm(orthogonal_noise, dim=-1, keepdim=True)
+        hidden_norm = torch.norm(hidden_states, dim=-1, keepdim=True)
+        scaled_orthogonal = (orthogonal_noise / (orthogonal_noise_norm + 1e-8) *
+                            hidden_norm * noise_scale)
+
+        perturbed = hidden_states + scaled_orthogonal
+        noise_info["noise_norm"] = torch.norm(scaled_orthogonal, dim=-1).mean().item()
+        noise_info["orthogonality"] = torch.sum(
+            F.normalize(scaled_orthogonal, dim=-1) * F.normalize(hidden_states, dim=-1),
+            dim=-1
+        ).mean().item()
+
+    elif noise_type == "targeted":
+        hidden_norm = torch.norm(hidden_states, dim=-1, keepdim=True)
+        direction = hidden_states / (hidden_norm + 1e-8)
+
+        if noise_direction == "opposite":
+            targeted_noise = -direction * hidden_norm * noise_scale
+            perturbed = hidden_states + targeted_noise
+        else:
+            targeted_noise = direction * hidden_norm * noise_scale
+            perturbed = hidden_states + targeted_noise
+
+        noise_info["noise_norm"] = torch.norm(targeted_noise, dim=-1).mean().item()
+        noise_info["direction"] = noise_direction or "same"
+
+    elif noise_type == "dropout":
+        dropout_prob = min(noise_scale, 1.0)
+        mask = torch.rand_like(hidden_states) > dropout_prob
+        perturbed = hidden_states * mask.to(hidden_states.dtype)
+        noise_info["dropout_prob"] = dropout_prob
+        noise_info["noise_norm"] = 0.0  
+
+    else:
+        raise ValueError(f"Unknown noise_type: {noise_type}")
+
+    perturbed_norm = torch.norm(perturbed, dim=-1).mean().item()
+    noise_info["perturbed_norm"] = perturbed_norm
+    noise_info["norm_change_ratio"] = perturbed_norm / (original_norm + 1e-8)
+
+    return perturbed, noise_info
 
 
 class Coconut(nn.Module):
@@ -70,6 +216,9 @@ class Coconut(nn.Module):
         labels: torch.Tensor,
         position_ids: torch.Tensor,
         noise_scale: float = 0.0,
+        noise_type: str = "gaussian",
+        noise_direction: Optional[str] = None,
+        apply_noise_to_all_passes: bool = True,
         **kwargs
     ) -> Outputs:
         """
@@ -84,7 +233,11 @@ class Coconut(nn.Module):
             attention_mask: Attention mask for input. Shape: (batch_size, seq_len)
             labels: Target token IDs for loss computation. Shape: (batch_size, seq_len)
             position_ids: Position IDs for each token. Shape: (batch_size, seq_len)
-            noise_scale: Scale of Gaussian noise to add to first pass hidden states. Default: 0.0
+            noise_scale: Scale/magnitude of noise to add to hidden states. Default: 0.0
+            noise_type: Type of noise distribution. Default: "gaussian"
+            noise_direction: Direction for directional noise types. Default: None
+            apply_noise_to_all_passes: If True, apply noise to ALL 8 latent passes (for systematic breakdown).
+                                       If False, only apply to first pass. Default: True
             **kwargs: Additional arguments (unused)
 
         Returns:
@@ -249,38 +402,42 @@ class Coconut(nn.Module):
             # This is the "continuous thought" representation that gets fed back
             hidden_states: torch.Tensor = outputs.hidden_states[-1]
 
-            # Step 4b: Apply noise to first pass (for robustness experiments)
-            # Note: This adds noise to the last hidden layer output of the FIRST latent pass
+            # Step 4b: Apply noise
+            # Note: This adds noise to the last hidden layer output of latent passes
             # in the continuous reasoning space, before it's fed back as input to the next pass
-            if pass_idx == 0 and noise_scale > 0.0:
-                noise = torch.randn_like(hidden_states) * noise_scale
-                hidden_states = hidden_states + noise
-                print(f"  Applied noise with scale {noise_scale} to first pass last hidden layer")
+            # By default (apply_noise_to_all_passes=True), noise is applied to ALL 8 passes
+            # This allows testing systematic breakdown as noise compounds across reasoning steps
+            # Set apply_noise_to_all_passes=False to only apply noise to the first pass
+            should_apply_noise = noise_scale > 0.0 and (apply_noise_to_all_passes or pass_idx == 0)
+            if should_apply_noise:
+                hidden_states, noise_info = apply_noise_to_hidden_states(
+                    hidden_states, noise_scale, noise_type, noise_direction
+                )
+                pass_info = "all passes" if apply_noise_to_all_passes else "first pass"
+                print(f"  Applied {noise_info['noise_type']} noise (scale={noise_scale}) to pass {pass_idx + 1} [{pass_info} mode]")
+                print(f"    Original norm: {noise_info['original_norm']:.4f}, "
+                      f"Noise norm: {noise_info['noise_norm']:.4f}, "
+                      f"Perturbed norm: {noise_info['perturbed_norm']:.4f}")
 
             kv_cache = outputs.past_key_values
 
-            # Step 5: Replace latent embeddings
+            # Step 5: Feed hidden states as input embeddings (TRUE COCONUT METHOD)
+            # Instead of replacing individual latent token embeddings, we feed the last
+            # hidden states directly as the input embeddings for the next latent position.
+            # This implements the continuous thought mechanism shown in the COCONUT diagram.
             filling_indices: List[Tuple[int, int]] = [
                 (instance_idx, mask_list[pass_idx])
                 for instance_idx, mask_list in enumerate(latent_lists)
                 if len(mask_list) > pass_idx
             ]
 
-            tensor_list: List[List[torch.Tensor]] = [
-                [inputs_embeds[batch_idx, pos, :] for pos in range(inputs_embeds.shape[1])]
-                for batch_idx in range(inputs_embeds.shape[0])
-            ]
-
             for idx_pair in filling_indices:
                 batch_idx, token_idx = idx_pair
-                tensor_list[batch_idx][token_idx] = hidden_states[
+                # Use the last hidden state from the current position directly as the
+                # next input embedding (continuous thought)
+                inputs_embeds[batch_idx, token_idx, :] = hidden_states[
                     batch_idx, token_idx - 1 - hidden_states_offset, :
                 ]
-
-            inputs_embeds = torch.stack([
-                torch.stack(tensor_list[batch_idx])
-                for batch_idx in range(inputs_embeds.shape[0])
-            ])
 
         # Step 6: Final forward pass
         if kv_cache is not None:
@@ -334,6 +491,243 @@ class Coconut(nn.Module):
         """Set the model to evaluation mode."""
         self.base_causallm.eval()
 
+    def generate_with_branching(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int = 16,
+        num_branches: int = 5,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        noise_scale: float = 0.0,
+        noise_type: str = "gaussian",
+        noise_direction: Optional[str] = None,
+        **kwargs
+    ) -> List[torch.Tensor]:
+        """
+        Generate N diverse sequences by branching after the first noisy latent pass.
+
+        Architecture:
+        1. First latent pass completes
+        2. Apply noise to the resulting embedding
+        3. Branch into N copies of this noisy embedding
+        4. Each branch independently continues through remaining 7 latent passes
+        5. Each branch independently generates autoregressively
+
+        Args:
+            input_ids: Input token IDs. Shape: (1, seq_len)
+            attention_mask: Attention mask
+            max_new_tokens: Max tokens to generate per branch
+            num_branches: Number of branches (N)
+            temperature: Sampling temperature
+            top_p: Nucleus sampling parameter
+            noise_scale: Noise to apply after first latent pass
+            noise_type: Type of noise distribution
+            noise_direction: Direction for directional noise
+
+        Returns:
+            List of N generated token sequences
+        """
+        assert input_ids.shape[0] == 1, "only support batch_size == 1"
+        device = input_ids.device
+
+        print(f"\n=== Branching Generation (N={num_branches}, noise={noise_scale}) ===")
+
+        # Detect latent tokens
+        latent_mask = input_ids == self.latent_token_id
+        latent_indices = latent_mask.nonzero()
+
+        start_latent_mask = input_ids == self.start_latent_id
+        end_latent_mask = input_ids == self.end_latent_id
+        start_latent_indices = start_latent_mask.nonzero()
+        end_latent_indices = end_latent_mask.nonzero()
+
+        has_latent_markers = len(start_latent_indices) > 0 and len(end_latent_indices) > 0
+
+        # Expand to 8 virtual latent tokens if using TRUE METHOD
+        if has_latent_markers:
+            start_pos = start_latent_indices[0][1].item()
+
+            before_start = input_ids[0, :start_pos + 1]
+            after_start = input_ids[0, start_pos + 1:]
+            virtual_latents = torch.full((MAX_N_LATENT,), self.latent_token_id,
+                                        dtype=input_ids.dtype, device=device)
+            input_ids = torch.cat([before_start, virtual_latents, after_start]).unsqueeze(0)
+
+            latent_mask = input_ids == self.latent_token_id
+            latent_indices = latent_mask.nonzero()
+
+        latent_positions = [idx[1].item() for idx in latent_indices if idx[0] == 0]
+        max_n_latents = len(latent_positions)
+
+        print(f"Step 1: First latent pass (with noise={noise_scale})...")
+
+        # FIRST LATENT PASS
+        inputs_embeds = self.embedding(input_ids)
+        next_compute_range = (0, latent_positions[0] if latent_positions else input_ids.shape[1])
+
+        outputs = self.base_causallm(
+            inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
+            attention_mask=torch.ones(1, next_compute_range[1], device=device),
+            position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+                                     dtype=torch.long, device=device).unsqueeze(0),
+            output_hidden_states=True,
+            use_cache=True,
+        )
+
+        hidden_states = outputs.hidden_states[-1]
+
+        # Apply noise to first pass
+        if noise_scale > 0.0:
+            hidden_states, noise_info = apply_noise_to_hidden_states(
+                hidden_states, noise_scale, noise_type, noise_direction
+            )
+            print(f"  Applied noise: {noise_info['noise_type']}, scale={noise_scale}")
+
+        # Fill first latent position with noisy embedding
+        inputs_embeds[0, latent_positions[0], :] = hidden_states[0, -1, :]
+        kv_cache = outputs.past_key_values
+
+        print(f"Step 2: Branching into {num_branches} paths for remaining {max_n_latents-1} latent passes...")
+
+        # BRANCH: Create N independent copies
+        all_branches = []
+        for branch_idx in range(num_branches):
+            branch_data = {
+                'inputs_embeds': inputs_embeds.clone(),
+                'kv_cache': self._clone_kv_cache(kv_cache),
+                'tokens': input_ids[0].detach().tolist()
+            }
+            all_branches.append(branch_data)
+
+        # REMAINING LATENT PASSES (2-8) - each branch independent
+        for pass_idx in range(1, max_n_latents):
+            for branch_idx, branch in enumerate(all_branches):
+                next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
+
+                # Truncate KV cache
+                if isinstance(branch['kv_cache'], tuple):
+                    cache_obj = DynamicCache()
+                    for layer_idx, (k, v) in enumerate(branch['kv_cache']):
+                        k_trunc = k[:, :, :next_compute_range[0], :]
+                        v_trunc = v[:, :, :next_compute_range[0], :]
+                        cache_obj.update(k_trunc, v_trunc, layer_idx)
+                    past_kv = cache_obj
+                else:
+                    cache_obj = DynamicCache()
+                    for layer_idx in range(len(branch['kv_cache'])):
+                        k, v = branch['kv_cache'][layer_idx]
+                        k_trunc = k[:, :, :next_compute_range[0], :]
+                        v_trunc = v[:, :, :next_compute_range[0], :]
+                        cache_obj.update(k_trunc, v_trunc, layer_idx)
+                    past_kv = cache_obj
+
+                outputs = self.base_causallm(
+                    inputs_embeds=branch['inputs_embeds'][:, next_compute_range[0]:next_compute_range[1], :],
+                    attention_mask=torch.ones(1, next_compute_range[1], device=device),
+                    position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+                                             dtype=torch.long, device=device).unsqueeze(0),
+                    past_key_values=past_kv,
+                    output_hidden_states=True,
+                    use_cache=True,
+                )
+
+                hidden_states = outputs.hidden_states[-1]
+                branch['inputs_embeds'][0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
+                branch['kv_cache'] = outputs.past_key_values
+
+        print(f"Step 3: Final pass and autoregressive generation for each branch...")
+
+        # FINAL PASS + AUTOREGRESSIVE GENERATION for each branch
+        all_generated_sequences = []
+
+        for branch_idx, branch in enumerate(all_branches):
+            print(f"  Branch {branch_idx + 1}/{num_branches}...", end=" ")
+
+            # Final forward pass
+            next_compute_range = (latent_positions[-1], input_ids.shape[1])
+
+            if isinstance(branch['kv_cache'], tuple):
+                cache_obj = DynamicCache()
+                for layer_idx, (k, v) in enumerate(branch['kv_cache']):
+                    k_trunc = k[:, :, :next_compute_range[0], :]
+                    v_trunc = v[:, :, :next_compute_range[0], :]
+                    cache_obj.update(k_trunc, v_trunc, layer_idx)
+                past_kv = cache_obj
+            else:
+                cache_obj = DynamicCache()
+                for layer_idx in range(len(branch['kv_cache'])):
+                    k, v = branch['kv_cache'][layer_idx]
+                    k_trunc = k[:, :, :next_compute_range[0], :]
+                    v_trunc = v[:, :, :next_compute_range[0], :]
+                    cache_obj.update(k_trunc, v_trunc, layer_idx)
+                past_kv = cache_obj
+
+            outputs = self.base_causallm(
+                inputs_embeds=branch['inputs_embeds'][:, next_compute_range[0]:next_compute_range[1], :],
+                attention_mask=torch.ones(1, input_ids.shape[1], device=device),
+                position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+                                         dtype=torch.long, device=device).unsqueeze(0),
+                past_key_values=past_kv,
+                output_hidden_states=True,
+            )
+
+            # Sample first token
+            logits = outputs.logits[0, -1] / temperature
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+            logits[indices_to_remove] = float('-inf')
+            probs = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).item()
+
+            branch['tokens'].append(next_token)
+            new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
+            new_inputs_embeds = torch.cat((branch['inputs_embeds'], new_token_embed), dim=1)
+
+            # Autoregressive generation
+            for _ in range(max_new_tokens - 1):
+                outputs = self.base_causallm(inputs_embeds=new_inputs_embeds)
+                logits = outputs.logits[0, -1] / temperature
+
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                logits[indices_to_remove] = float('-inf')
+                probs = torch.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).item()
+
+                if next_token == self.eos_token_id:
+                    break
+
+                branch['tokens'].append(next_token)
+                new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
+                new_inputs_embeds = torch.cat((new_inputs_embeds, new_token_embed), dim=1)
+
+            generated_sequence = torch.tensor(branch['tokens']).view(1, -1)
+            all_generated_sequences.append(generated_sequence)
+            print(f"{len(branch['tokens']) - input_ids.shape[1]} new tokens")
+
+        print(f"=== Completed {num_branches} branches ===\n")
+        return all_generated_sequences
+
+    def _clone_kv_cache(self, kv_cache):
+        """Clone KV cache for branching."""
+        if isinstance(kv_cache, tuple):
+            return tuple((k.clone(), v.clone()) for k, v in kv_cache)
+        else:
+            cloned = DynamicCache()
+            for layer_idx in range(len(kv_cache)):
+                k, v = kv_cache[layer_idx]
+                cloned.update(k.clone(), v.clone(), layer_idx)
+            return cloned
+
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -342,6 +736,9 @@ class Coconut(nn.Module):
         output_embedding: bool = False,
         synced_gpus: bool = False,
         noise_scale: float = 0.0,
+        noise_type: str = "gaussian",
+        noise_direction: Optional[str] = None,
+        apply_noise_to_all_passes: bool = True,
         **kwargs
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -356,7 +753,11 @@ class Coconut(nn.Module):
             max_new_tokens: Maximum number of new tokens to generate
             output_embedding: If True, return both tokens and final embeddings
             synced_gpus: If True, sync forward passes across GPUs (for FSDP)
-            noise_scale: Scale of Gaussian noise to add to first latent pass. Default: 0.0
+            noise_scale: Scale/magnitude of noise to add to hidden states. Default: 0.0
+            noise_type: Type of noise distribution. Default: "gaussian"
+            noise_direction: Direction for directional noise types. Default: None
+            apply_noise_to_all_passes: If True, apply noise to ALL 8 latent passes (for systematic breakdown).
+                                       If False, only apply to first pass. Default: True
             **kwargs: Additional arguments (unused)
 
         Returns:
@@ -384,7 +785,10 @@ class Coconut(nn.Module):
             torch.arange(
                 0, input_ids.shape[1], dtype=torch.long, device=input_ids.device
             ).reshape(1, -1),
-            noise_scale=noise_scale  # CRITICAL: Pass noise to forward!
+            noise_scale=noise_scale,
+            noise_type=noise_type,
+            noise_direction=noise_direction,
+            apply_noise_to_all_passes=apply_noise_to_all_passes
         )
         inputs_embeds: torch.Tensor = outputs.inputs_embeds
 

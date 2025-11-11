@@ -64,49 +64,129 @@ def setup_model_and_tokenizer(model_name: str = "meta-llama/Llama-3.1-8B-Instruc
     return tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id
 
 
-def load_gsm8k_dataset(num_questions: int = None) -> List[Dict[str, str]]:
-    """Load GSM8K test dataset."""
-    print(f"\nLoading GSM8K test set...")
-    
-    dataset = load_dataset("gsm8k", "main", split="test")
-    
-    if num_questions is None:
-        num_questions = len(dataset)
-    
-    questions = []
-    for i in range(min(num_questions, len(dataset))):
-        item = dataset[i]
-        questions.append({
-            "question": item["question"],
-            "answer": item["answer"],
-            "question_id": i
-        })
-    
-    print(f"Loaded {len(questions)} questions")
+def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None) -> List[Dict[str, str]]:
+    """
+    Load benchmark dataset (GSM8K, GSM-Symbolic, or MMLU).
+
+    Args:
+        benchmark: One of "gsm8k", "gsm-symbolic", or "mmlu"
+        num_questions: Number of questions to load (None = all)
+
+    Returns:
+        List of dictionaries with "question", "answer", "question_id" fields
+    """
+    print(f"\nLoading {benchmark.upper()} test set...")
+
+    if benchmark == "gsm8k":
+        dataset = load_dataset("gsm8k", "main", split="test")
+        questions = []
+        for i in range(min(num_questions or len(dataset), len(dataset))):
+            item = dataset[i]
+            questions.append({
+                "question": item["question"],
+                "answer": item["answer"],
+                "question_id": i,
+                "benchmark": "gsm8k"
+            })
+
+    elif benchmark == "gsm-symbolic":
+        dataset = load_dataset("apple/gsm-symbolic", split="test", trust_remote_code=True)
+        questions = []
+        for i in range(min(num_questions or len(dataset), len(dataset))):
+            item = dataset[i]
+            questions.append({
+                "question": item["question"],
+                "answer": item["answer"],
+                "question_id": i,
+                "benchmark": "gsm-symbolic"
+            })
+
+    elif benchmark == "mmlu":
+        dataset = load_dataset("cais/mmlu", "all", split="test", trust_remote_code=True)
+        questions = []
+        answer_mapping = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
+
+        for i in range(min(num_questions or len(dataset), len(dataset))):
+            item = dataset[i]
+            # Format multiple choice question
+            choices_text = "\n".join([f"{chr(65+j)}. {choice}" for j, choice in enumerate(item["choices"])])
+            formatted_question = f"{item['question']}\n\n{choices_text}"
+
+            # Get correct answer letter
+            correct_answer = answer_mapping[item["answer"]]
+
+            questions.append({
+                "question": formatted_question,
+                "answer": f"#### {correct_answer}",  # Format consistent with GSM8K
+                "question_id": i,
+                "benchmark": "mmlu",
+                "subject": item.get("subject", "unknown"),
+                "choices": item["choices"],
+                "correct_choice_idx": item["answer"]
+            })
+
+    else:
+        raise ValueError(f"Unknown benchmark: {benchmark}. Must be one of: gsm8k, gsm-symbolic, mmlu")
+
+    print(f"Loaded {len(questions)} questions from {benchmark.upper()}")
     return questions
 
 
-def extract_numerical_answer(text: str) -> str:
-    """Extract numerical answer from text."""
-    patterns = [
-        r'####\s*(\d+)',
-        r'[Aa]nswer[:\s]+(\d+)',
-        r'=\s*(\d+)',
-        r'is\s+(\d+)',
-        r'\$(\d+)',
-        r'(\d+)\s*dollars?',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
-    
-    numbers = re.findall(r'\d+', text)
-    if numbers:
-        return numbers[-1]
-    
-    return "NO_ANSWER_FOUND"
+def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
+    """
+    Extract answer from generated text based on benchmark type.
+
+    Args:
+        text: Generated text to extract answer from
+        benchmark: Type of benchmark (gsm8k, gsm-symbolic, or mmlu)
+
+    Returns:
+        Extracted answer string
+    """
+    if benchmark == "mmlu":
+        # For MMLU, look for A, B, C, or D
+        # Try various patterns for multiple choice answers
+        patterns = [
+            r'####\s*([A-D])',  # GSM8K style format
+            r'[Tt]he answer is\s*([A-D])',
+            r'[Aa]nswer[:\s]+([A-D])',
+            r'^([A-D])\.',  # Answer starts with letter
+            r'\b([A-D])\b',  # Single letter answer
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).upper()
+
+        # Fallback: find any single capital letter A-D
+        letters = re.findall(r'\b([A-D])\b', text)
+        if letters:
+            return letters[-1].upper()
+
+        return "NO_ANSWER_FOUND"
+
+    else:
+        # For GSM8K and GSM-Symbolic, extract numerical answers
+        patterns = [
+            r'####\s*(\d+)',
+            r'[Aa]nswer[:\s]+(\d+)',
+            r'=\s*(\d+)',
+            r'is\s+(\d+)',
+            r'\$(\d+)',
+            r'(\d+)\s*dollars?',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+
+        numbers = re.findall(r'\d+', text)
+        if numbers:
+            return numbers[-1]
+
+        return "NO_ANSWER_FOUND"
 
 
 def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int):
@@ -149,10 +229,12 @@ def test_question_with_noise(
     noise_scale: float,
     start_latent_id: int,
     end_latent_id: int,
-    max_new_tokens: int = 100,
-    device: str = 'cpu'
+    max_new_tokens: int = 1056,
+    device: str = 'cpu',
+    noise_type: str = 'gaussian',
+    noise_direction: str = None
 ) -> Dict[str, Any]:
-    """Test a single question with specific noise scale."""
+    """Test a single question with specific noise scale and type."""
 
     coconut_model.eval()
 
@@ -166,7 +248,10 @@ def test_question_with_noise(
                 input_ids=input_ids,
                 attention_mask=torch.ones_like(input_ids),
                 max_new_tokens=max_new_tokens,
-                noise_scale=noise_scale
+                noise_scale=noise_scale,
+                noise_type=noise_type,
+                noise_direction=noise_direction,
+                apply_noise_to_all_passes=True
             )
 
             generated_text = extract_generated_only(
@@ -208,13 +293,16 @@ def test_question_with_noise(
 def run_full_experiment(
     num_questions: int = None,  # None = full dataset
     noise_scales: List[float] = None,
-    max_new_tokens: int = 100,
+    max_new_tokens: int = 1056,
     model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
     save_interval: int = 50,
-    output_dir: str = "coconut_results"
+    output_dir: str = "coconut_results",
+    noise_type: str = "gaussian",
+    noise_direction: str = None,
+    benchmark: str = "gsm8k"
 ) -> Dict[str, Any]:
     """Run complete experiment on full GSM8K."""
-    
+
     if noise_scales is None:
         noise_scales = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
 
@@ -225,6 +313,8 @@ def run_full_experiment(
     print("="*70)
     print("COCONUT FULL GSM8K NOISE EXPERIMENT")
     print("="*70)
+    print(f"Noise type: {noise_type}")
+    print(f"Noise direction: {noise_direction if noise_direction else 'N/A'}")
     print(f"Noise scales: {noise_scales}")
     print(f"Device: {device}")
     print(f"Model: {model_name}")
@@ -244,13 +334,16 @@ def run_full_experiment(
     )
     
     # Load questions
-    questions = load_gsm8k_dataset(num_questions)
+    questions = load_benchmark_dataset(benchmark, num_questions)
     
     # Initialize results structure
     results = {
         "experiment_info": {
             "timestamp": datetime.now().isoformat(),
+            "benchmark": benchmark,
             "num_questions": len(questions),
+            "noise_type": noise_type,
+            "noise_direction": noise_direction,
             "noise_scales": noise_scales,
             "max_new_tokens": max_new_tokens,
             "device": device,
@@ -289,12 +382,14 @@ def run_full_experiment(
                 start_latent_id=start_latent_id,
                 end_latent_id=end_latent_id,
                 max_new_tokens=max_new_tokens,
-                device=device
+                device=device,
+                noise_type=noise_type,
+                noise_direction=noise_direction
             )
             
             if result["success"]:
-                generated_answer = extract_numerical_answer(result["generated_text"])
-                expected_answer = extract_numerical_answer(q_data["answer"])
+                generated_answer = extract_answer(result["generated_text"], benchmark)
+                expected_answer = extract_answer(q_data["answer"], benchmark)
                 is_correct = generated_answer == expected_answer
 
                 # Update accuracy tracking
@@ -316,7 +411,7 @@ def run_full_experiment(
                     "noise_scale": noise_scale,
                     "generated_text": "",
                     "generated_answer": None,
-                    "expected_answer": extract_numerical_answer(q_data["answer"]),
+                    "expected_answer": extract_answer(q_data["answer"], benchmark),
                     "is_correct": False,
                     "success": False,
                     "error": result["error"]
@@ -501,17 +596,24 @@ def print_summary(results: Dict[str, Any]):
 
 def main():
     """Main experiment runner."""
-    
+
     # Configuration
-    NUM_QUESTIONS = None  # None = full dataset (1319 questions)
-    # Or set to a smaller number for testing: NUM_QUESTIONS = 100
-    
-    NOISE_SCALES = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
-    MAX_NEW_TOKENS = 100
+    BENCHMARK = "gsm8k"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
+    NUM_QUESTIONS = 900  # None = full test set (all questions)
+    # Or set to a number for testing: NUM_QUESTIONS = 100
+
+    # Targeted noise configuration - opposite direction with multiplicative effect
+    NOISE_TYPE = "gaussian_scaled"
+    NOISE_DIRECTION = None
+    # Granular noise scales to capture smooth decay curve (not cherry-picked)
+    # Since multiplication causes exponential growth, use finer granularity at lower scales
+    NOISE_SCALES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+
+    MAX_NEW_TOKENS = 512
     MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
-    OUTPUT_DIR = "coconut_full_results"
+    OUTPUT_DIR = "coconut_gaussian_scaled_results"
     SAVE_INTERVAL = 50  # Save checkpoint every N questions
-    
+
     # Run experiment
     results = run_full_experiment(
         num_questions=NUM_QUESTIONS,
@@ -519,7 +621,10 @@ def main():
         max_new_tokens=MAX_NEW_TOKENS,
         model_name=MODEL_NAME,
         save_interval=SAVE_INTERVAL,
-        output_dir=OUTPUT_DIR
+        output_dir=OUTPUT_DIR,
+        noise_type=NOISE_TYPE,
+        noise_direction=NOISE_DIRECTION,
+        benchmark=BENCHMARK
     )
     
     # Save final results

@@ -1,0 +1,33 @@
+Loading checkpoint shards:   0%|          | 0/19 [00:00<?, ?it/s]Loading checkpoint shards:   5%|▌         | 1/19 [00:02<00:45,  2.53s/it]Loading checkpoint shards:  11%|█         | 2/19 [00:05<00:43,  2.58s/it]Loading checkpoint shards:  16%|█▌        | 3/19 [00:07<00:40,  2.53s/it]Loading checkpoint shards:  21%|██        | 4/19 [00:10<00:37,  2.49s/it]Loading checkpoint shards:  26%|██▋       | 5/19 [00:12<00:34,  2.49s/it]Loading checkpoint shards:  32%|███▏      | 6/19 [00:15<00:32,  2.52s/it]Loading checkpoint shards:  37%|███▋      | 7/19 [00:17<00:29,  2.47s/it]Loading checkpoint shards:  42%|████▏     | 8/19 [00:19<00:27,  2.46s/it]Loading checkpoint shards:  47%|████▋     | 9/19 [00:22<00:24,  2.50s/it]Loading checkpoint shards:  53%|█████▎    | 10/19 [00:25<00:22,  2.50s/it]Loading checkpoint shards:  58%|█████▊    | 11/19 [00:27<00:20,  2.58s/it]Loading checkpoint shards:  63%|██████▎   | 12/19 [00:30<00:18,  2.69s/it]Loading checkpoint shards:  68%|██████▊   | 13/19 [00:33<00:16,  2.78s/it]Loading checkpoint shards:  74%|███████▎  | 14/19 [00:36<00:14,  2.81s/it]Loading checkpoint shards:  79%|███████▉  | 15/19 [00:39<00:11,  2.78s/it]Loading checkpoint shards:  84%|████████▍ | 16/19 [00:41<00:08,  2.67s/it]Loading checkpoint shards:  89%|████████▉ | 17/19 [00:43<00:04,  2.40s/it]Loading checkpoint shards:  95%|█████████▍| 18/19 [00:45<00:02,  2.22s/it]Loading checkpoint shards: 100%|██████████| 19/19 [00:46<00:00,  2.03s/it]Loading checkpoint shards: 100%|██████████| 19/19 [00:46<00:00,  2.47s/it]
+Some parameters are on the meta device because they were offloaded to the cpu.
+The new embeddings will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+The new lm_head weights will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+Traceback (most recent call last):
+  File "/sfs/weka/scratch/mj6ux/Projects/coconut/quick_branch_test.py", line 415, in <module>
+    run_quick_test()
+  File "/sfs/weka/scratch/mj6ux/Projects/coconut/quick_branch_test.py", line 284, in run_quick_test
+    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(MODEL_NAME)
+                                                                                           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sfs/weka/scratch/mj6ux/Projects/coconut/quick_branch_test.py", line 69, in setup_model
+    base_model.resize_token_embeddings(len(tokenizer))
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/transformers/modeling_utils.py", line 3209, in resize_token_embeddings
+    model_embeds = self._resize_token_embeddings(new_num_tokens, pad_to_multiple_of, mean_resizing)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/transformers/modeling_utils.py", line 3264, in _resize_token_embeddings
+    new_lm_head = self._get_resized_lm_head(old_lm_head, new_num_tokens, mean_resizing=mean_resizing)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/transformers/modeling_utils.py", line 3538, in _get_resized_lm_head
+    self._init_added_lm_head_weights_with_mean(
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/transformers/modeling_utils.py", line 3601, in _init_added_lm_head_weights_with_mean
+    self._init_added_embeddings_weights_with_mean(
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/transformers/modeling_utils.py", line 3571, in _init_added_embeddings_weights_with_mean
+    is_covariance_psd = constraints.positive_definite.check(epsilon * covariance).all()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/torch/distributions/constraints.py", line 578, in check
+    sym_check = super().check(value)
+                ^^^^^^^^^^^^^^^^^^^^
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/torch/distributions/constraints.py", line 555, in check
+    if not square_check.all():
+  File "/home/mj6ux/.local/lib/python3.11/site-packages/torch/_meta_registrations.py", line 6585, in meta_local_scalar_dense
+    raise RuntimeError("Tensor.item() cannot be called on meta tensors")
+RuntimeError: Tensor.item() cannot be called on meta tensors
