@@ -24,8 +24,8 @@ from collections import Counter
 # QUICK TEST CONFIGURATION
 # ============================================================================
 
-BENCHMARK = "gsm8k"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
-MODEL_NAME = "/scratch/mj6ux/.cache/hf_models/hub/models--openai--gpt-oss-20b"  # Small, fast model for testing
+BENCHMARK = "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
+MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"  # Small, fast model for testing
 NUM_QUESTIONS = 50  # Number of questions to test
 NUM_BRANCHES = 5   # Use 5 branches for testing
 MAX_NEW_TOKENS = 512  # Shorter for faster testing
@@ -354,6 +354,7 @@ def run_quick_test():
     print("QUICK BRANCHING + MAJORITY VOTING TEST")
     print("="*70)
     print(f"Model: {MODEL_NAME}")
+    print(f"Benchmark: {BENCHMARK}")
     print(f"Questions: {NUM_QUESTIONS}")
     print(f"Branches: {NUM_BRANCHES}")
     print(f"Noise scales: {NOISE_SCALES}")
@@ -468,7 +469,7 @@ def run_quick_test():
 
     # Save results
     model_name_safe = MODEL_NAME.replace('/', '_')
-    output_file = f"quick_branch_test_results_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_file = f"noisy_coconut_{BENCHMARK}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(output_file, 'w') as f:
         json.dump({
             "config": {

@@ -13,4 +13,4 @@
 #SBATCH --account=uvasrg_paid
 #SBATCH --constraint=a100_80gb
 
-python3 quick_branch_test.py 800
+python3 /scratch/mj6ux/Projects/coconut/quick_branch_test.py 1000
