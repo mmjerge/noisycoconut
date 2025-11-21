@@ -40,7 +40,8 @@ def setup_model_and_tokenizer(model_name: str = "Qwen/Qwen3-0.6B"):
     # Load model
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,  # Use FP16 for efficiency
+        # torch_dtype=torch.float16
+        torch_dtype=torch.bfloat16,  # Use FP16 for efficiency
         device_map="auto",  # Automatically handle device placement
         trust_remote_code=True
     )

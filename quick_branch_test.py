@@ -24,8 +24,8 @@ from collections import Counter
 # QUICK TEST CONFIGURATION
 # ============================================================================
 
-BENCHMARK = "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"  # Small, fast model for testing
+BENCHMARK = "gsm8k"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
+MODEL_NAME = "/scratch/mj6ux/.cache/hf_models/gpt-oss-20b"  # Small, fast model for testing
 NUM_QUESTIONS = 50  # Number of questions to test
 NUM_BRANCHES = 5   # Use 5 branches for testing
 MAX_NEW_TOKENS = 512  # Shorter for faster testing
@@ -52,14 +52,24 @@ def setup_model(model_name: str = MODEL_NAME):
         use_fast=True
     )
 
-    dtype = torch.float16
-    print(f"Using float16")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        dtype=dtype,
-        device_map="auto",
-        trust_remote_code=True
-    )
+    if model_name == "/scratch/mj6ux/.cache/hf_models/gpt-oss-20b":
+        dtype = torch.bfloat16
+        print("Using bfloat16")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True
+        )
+    else:
+        dtype = torch.float16
+        print("Using float16")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True
+        )
 
     special_tokens = {
         'additional_special_tokens': ['<|latent|>', '<|start-latent|>', '<|end-latent|>']
