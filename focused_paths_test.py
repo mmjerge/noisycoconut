@@ -1,12 +1,11 @@
 """
-Quick test script for Coconut branching with majority voting.
+Focused test script: Compare different numbers of branches (paths) with fixed parameters.
 
-This is a simplified version for quick testing and debugging of the branching
-and majority voting functionality. Use this to verify the system works before
-running larger experiments.
+This tests K = [3, 5, 7, 10] branches to find the optimal number that balances
+accuracy improvement with computational cost.
 
 Usage:
-    python quick_branch_test.py
+    python focused_paths_test.py [num_questions]
 """
 
 import torch
@@ -21,20 +20,20 @@ import re
 from collections import Counter
 
 # ============================================================================
-# QUICK TEST CONFIGURATION
+# FOCUSED TEST CONFIGURATION - Compare Number of Paths
 # ============================================================================
 
-BENCHMARK = "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
-MODEL_NAME = "/scratch/mj6ux/.cache/hf_models/Mixtral-8x7B-Instruct-v0.1"
+BENCHMARK = "gsm8k"
+MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 NUM_QUESTIONS = 100
-NUM_BRANCHES = 5
-MAX_NEW_TOKENS = 2056
 
-NOISE_SCALES = [0.0, 0.2, 0.5, 1.0] 
+# FOCUSED: Test different numbers of branches with fixed other parameters
+NUM_BRANCHES_LIST = [3, 5, 7, 10]  # K values to test
+NOISE_SCALE = 0.1  # Use optimal from noise scale ablation
 NOISE_TYPE = "gaussian_scaled"
-NOISE_DIRECTION = None
+NOISE_AT_STEP = 1  # Use step 1
 
-# Sampling parameters
+MAX_NEW_TOKENS = 512
 TEMPERATURE = 0.7
 TOP_P = 0.9
 
@@ -44,13 +43,12 @@ TOP_P = 0.9
 def setup_model(model_name: str = MODEL_NAME):
     """Initialize model and add special tokens."""
     print(f"Loading {model_name}...")
-
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
         use_fast=True
     )
-
+    
     if model_name == "/scratch/mj6ux/.cache/hf_models/gpt-oss-20b":
         dtype = torch.bfloat16
         print("Using bfloat16")
@@ -69,42 +67,28 @@ def setup_model(model_name: str = MODEL_NAME):
             device_map="auto",
             trust_remote_code=True
         )
-
+    
     special_tokens = {
         'additional_special_tokens': ['<|latent|>', '<|start-latent|>', '<|end-latent|>']
     }
     num_added = tokenizer.add_special_tokens(special_tokens)
     print(f"Added {num_added} special tokens")
-
     base_model.resize_token_embeddings(len(tokenizer))
-
+    
     latent_token_id = tokenizer.convert_tokens_to_ids('<|latent|>')
     start_latent_id = tokenizer.convert_tokens_to_ids('<|start-latent|>')
     end_latent_id = tokenizer.convert_tokens_to_ids('<|end-latent|>')
     eos_token_id = tokenizer.eos_token_id
-
+    
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
+    
     print(f"✓ Model loaded!")
-    print(f"  <|latent|>: {latent_token_id}")
-    print(f"  <|start-latent|>: {start_latent_id}")
-    print(f"  <|end-latent|>: {end_latent_id}")
-
     return tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id
 
 
 def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None) -> List[Dict[str, str]]:
-    """
-    Load benchmark dataset (GSM8K, GSM-Symbolic, or MMLU).
-
-    Args:
-        benchmark: One of "gsm8k", "gsm-symbolic", or "mmlu"
-        num_questions: Number of questions to load (None = all)
-
-    Returns:
-        List of dictionaries with "question", "answer", "question_id" fields
-    """
+    """Load benchmark dataset."""
     print(f"\nLoading {benchmark.upper()} test set...")
 
     if benchmark == "gsm8k":
@@ -138,16 +122,13 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None) 
 
         for i in range(min(num_questions or len(dataset), len(dataset))):
             item = dataset[i]
-            # Format multiple choice question
             choices_text = "\n".join([f"{chr(65+j)}. {choice}" for j, choice in enumerate(item["choices"])])
             formatted_question = f"{item['question']}\n\n{choices_text}"
-
-            # Get correct answer letter
             correct_answer = answer_mapping[item["answer"]]
 
             questions.append({
                 "question": formatted_question,
-                "answer": f"#### {correct_answer}",  # Format consistent with GSM8K
+                "answer": f"#### {correct_answer}",
                 "question_id": i,
                 "benchmark": "mmlu",
                 "subject": item.get("subject", "unknown"),
@@ -156,32 +137,21 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None) 
             })
 
     else:
-        raise ValueError(f"Unknown benchmark: {benchmark}. Must be one of: gsm8k, gsm-symbolic, mmlu")
+        raise ValueError(f"Unknown benchmark: {benchmark}")
 
     print(f"Loaded {len(questions)} questions from {benchmark.upper()}")
     return questions
 
 
 def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
-    """
-    Extract answer from generated text based on benchmark type.
-
-    Args:
-        text: Generated text to extract answer from
-        benchmark: Type of benchmark (gsm8k, gsm-symbolic, or mmlu)
-
-    Returns:
-        Extracted answer string
-    """
+    """Extract answer from generated text."""
     if benchmark == "mmlu":
-        # For MMLU, look for A, B, C, or D
-        # Try various patterns for multiple choice answers
         patterns = [
-            r'####\s*([A-D])',  # GSM8K style format
+            r'####\s*([A-D])',
             r'[Tt]he answer is\s*([A-D])',
             r'[Aa]nswer[:\s]+([A-D])',
-            r'^([A-D])\.',  # Answer starts with letter
-            r'\b([A-D])\b',  # Single letter answer
+            r'^([A-D])\.',
+            r'\b([A-D])\b',
         ]
 
         for pattern in patterns:
@@ -189,7 +159,6 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
             if match:
                 return match.group(1).upper()
 
-        # Fallback: find any single capital letter A-D
         letters = re.findall(r'\b([A-D])\b', text)
         if letters:
             return letters[-1].upper()
@@ -197,7 +166,6 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
         return "NO_ANSWER_FOUND"
 
     else:
-        # For GSM8K and GSM-Symbolic, extract numerical answers
         def clean_number(num_str: str) -> str:
             return num_str.replace(',', '').replace('$', '').strip()
 
@@ -224,9 +192,8 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
         return "NO_ANSWER_FOUND"
 
 
-def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int, model_name: str = ""):
-    """Create input for Coconut model with latent reasoning markers."""
-    
+def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int):
+    """Create input for Coconut model."""
     messages = [
         {"role": "user", "content": f"{question}\n\nPlease solve this step by step."}
     ]
@@ -239,82 +206,56 @@ def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_lat
         add_special_tokens=True
     )
 
-    if "gpt-oss" in model_name:
-        # Model expects: <|start|>assistant<|channel|>...<|message|>
-        # Insert latent markers after adding the channel structure
-        channel_token = tokenizer.convert_tokens_to_ids('<|channel|>')
-        message_token = tokenizer.convert_tokens_to_ids('<|message|>')
-        
-        # Encode "analysis" as that's the first channel it expects
-        analysis_ids = tokenizer.encode('analysis', add_special_tokens=False)
-        
-        # Build: question_ids + <|channel|> + analysis + <|message|> + <|start-latent|> + <|end-latent|>
-        channel_prefix = torch.tensor([[channel_token] + analysis_ids + [message_token]])
-        start_token = torch.tensor([[start_latent_id]])
-        end_token = torch.tensor([[end_latent_id]])
-        
-        input_ids = torch.cat([question_ids, channel_prefix, start_token, end_token], dim=1)
-    else:
-        # Standard format for other models
-        start_token = torch.tensor([[start_latent_id]])
-        end_token = torch.tensor([[end_latent_id]])
-        input_ids = torch.cat([question_ids, start_token, end_token], dim=1)
+    start_token = torch.tensor([[start_latent_id]])
+    end_token = torch.tensor([[end_latent_id]])
+    input_ids = torch.cat([question_ids, start_token, end_token], dim=1)
 
     return input_ids
 
 
 def extract_generated_only(tokenizer, full_ids: torch.Tensor, original_input_ids: torch.Tensor, end_latent_id: int) -> str:
-    """Extract only the newly generated tokens after <end-latent>."""
+    """Extract only newly generated tokens."""
     end_latent_positions = (original_input_ids[0] == end_latent_id).nonzero(as_tuple=True)[0]
 
     if len(end_latent_positions) > 0:
         end_latent_pos_expanded = end_latent_positions[0].item() + 8
-
         if full_ids.shape[1] > end_latent_pos_expanded + 1:
             generated_ids = full_ids[0, end_latent_pos_expanded + 1:]
-            generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            return generated_text.strip()
+            return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
     original_len = original_input_ids.shape[1]
     if full_ids.shape[1] > original_len:
         generated_ids = full_ids[0, original_len:]
-        generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-        return generated_text.strip()
+        return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
     return ""
 
 
 def majority_vote(answers: List[str]) -> str:
-    """Perform majority voting on a list of answers."""
+    """Perform majority voting."""
     if not answers:
         return "NO_ANSWER_FOUND"
-
     vote_counts = Counter(answers)
-    most_common = vote_counts.most_common(1)[0][0]
-    return most_common
+    return vote_counts.most_common(1)[0][0]
+
+
+def calculate_path_diversity(branch_answers: List[str]) -> float:
+    """Calculate path diversity as the ratio of unique answers to total branches."""
+    if not branch_answers:
+        return 0.0
+    unique_answers = len(set(branch_answers))
+    return unique_answers / len(branch_answers)
 
 
 def test_question_with_branching(
-    coconut_model,
-    tokenizer,
-    question: str,
-    noise_scale: float,
-    start_latent_id: int,
-    end_latent_id: int,
-    num_branches: int,
-    temperature: float,
-    top_p: float,
-    max_new_tokens: int,
-    device: str,
-    noise_type: str,
-    noise_direction: str,
-    benchmark: str = "gsm8k",
-    model_name=MODEL_NAME 
+    coconut_model, tokenizer, question: str, num_branches: int,
+    noise_scale: float, noise_at_step: int, start_latent_id: int,
+    end_latent_id: int, temperature: float, top_p: float,
+    max_new_tokens: int, device: str, noise_type: str, benchmark: str = "gsm8k"
 ) -> Dict[str, Any]:
-    """Test a single question using branching generation with majority voting."""
+    """Test a single question using branching generation."""
     coconut_model.eval()
-
-    input_ids = create_coconut_input(tokenizer, question, start_latent_id, end_latent_id, model_name=MODEL_NAME)
+    input_ids = create_coconut_input(tokenizer, question, start_latent_id, end_latent_id)
     original_input_ids = input_ids.clone()
     input_ids = input_ids.to(device)
 
@@ -329,33 +270,29 @@ def test_question_with_branching(
                 top_p=top_p,
                 noise_scale=noise_scale,
                 noise_type=noise_type,
-                noise_direction=noise_direction
+                noise_direction=None,
+                noise_at_step=noise_at_step
             )
 
             branch_texts = []
             branch_answers = []
 
             for branch_ids in all_branches:
-                branch_text = extract_generated_only(
-                    tokenizer,
-                    branch_ids,
-                    original_input_ids,
-                    end_latent_id
-                )
+                branch_text = extract_generated_only(tokenizer, branch_ids, original_input_ids, end_latent_id)
                 branch_answer = extract_answer(branch_text, benchmark)
-
                 branch_texts.append(branch_text)
                 branch_answers.append(branch_answer)
 
             majority_answer = majority_vote(branch_answers)
             vote_distribution = dict(Counter(branch_answers))
+            diversity = calculate_path_diversity(branch_answers)
 
             return {
                 "success": True,
-                "branch_texts": branch_texts,
                 "branch_answers": branch_answers,
                 "majority_answer": majority_answer,
                 "vote_distribution": vote_distribution,
+                "path_diversity": diversity,
                 "num_branches": num_branches,
                 "error": None
             }
@@ -363,87 +300,81 @@ def test_question_with_branching(
         except Exception as e:
             return {
                 "success": False,
-                "branch_texts": [],
                 "branch_answers": [],
                 "majority_answer": "NO_ANSWER_FOUND",
                 "vote_distribution": {},
+                "path_diversity": 0.0,
                 "num_branches": num_branches,
                 "error": str(e)
             }
 
 
-def run_quick_test():
-    """Run a quick test of branching and majority voting."""
+def run_focused_test():
+    """Run focused test comparing different numbers of paths."""
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print("\n" + "="*70)
-    print("QUICK BRANCHING + MAJORITY VOTING TEST")
+    print("FOCUSED TEST: Comparing Number of Paths (K)")
     print("="*70)
     print(f"Model: {MODEL_NAME}")
     print(f"Benchmark: {BENCHMARK}")
     print(f"Questions: {NUM_QUESTIONS}")
-    print(f"Branches: {NUM_BRANCHES}")
-    print(f"Noise scales: {NOISE_SCALES}")
-    print(f"Noise type: {NOISE_TYPE}")
-    print(f"Temperature: {TEMPERATURE}, Top-p: {TOP_P}")
+    print(f"Testing K values: {NUM_BRANCHES_LIST}")
+    print(f"Fixed noise scale: {NOISE_SCALE}")
+    print(f"Fixed noise type: {NOISE_TYPE}")
+    print(f"Fixed noise at step: {NOISE_AT_STEP}")
     print(f"Device: {device}")
     print("="*70)
+    print(f"\n→ This will run {len(NUM_BRANCHES_LIST)} experiments per question")
+    print(f"→ Total: {NUM_QUESTIONS * len(NUM_BRANCHES_LIST)} experiments\n")
 
     # Setup
     tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(MODEL_NAME)
-
-    if "gpt-oss" in MODEL_NAME:
-        hidden_layer_idx = 1
-    else:
-        hidden_layer_idx = -1
 
     coconut_model = Coconut(
         base_causallm=base_model,
         latent_token_id=latent_token_id,
         start_latent_id=start_latent_id,
         end_latent_id=end_latent_id,
-        eos_token_id=eos_token_id,
-        hidden_layer_idx=hidden_layer_idx
+        eos_token_id=eos_token_id
     )
 
     questions = load_benchmark_dataset(BENCHMARK, NUM_QUESTIONS)
-
     results = []
 
     for q_idx, q_data in enumerate(questions):
         print(f"\n{'='*70}")
         print(f"Question {q_idx + 1}/{len(questions)}")
         print(f"{'='*70}")
-        print(f"Q: {q_data['question']}")
-        print(f"\nExpected Answer: {extract_answer(q_data['answer'], BENCHMARK)}")
+        print(f"Q: {q_data['question'][:80]}...")
+        print(f"Expected Answer: {extract_answer(q_data['answer'], BENCHMARK)}")
 
         question_results = {
             "question_id": q_data["question_id"],
             "question": q_data["question"],
             "expected_answer": q_data["answer"],
-            "noise_tests": []
+            "path_tests": []
         }
 
-        for noise_scale in NOISE_SCALES:
-            print(f"\n{'-'*70}")
-            print(f"Testing noise={noise_scale} with {NUM_BRANCHES} branches...")
-            print(f"{'-'*70}")
+        # Test each K value
+        for num_branches in NUM_BRANCHES_LIST:
+            print(f"\n  → Testing K={num_branches}...", end=" ")
 
             result = test_question_with_branching(
                 coconut_model=coconut_model,
                 tokenizer=tokenizer,
                 question=q_data["question"],
-                noise_scale=noise_scale,
+                num_branches=num_branches,
+                noise_scale=NOISE_SCALE,
+                noise_at_step=NOISE_AT_STEP,
                 start_latent_id=start_latent_id,
                 end_latent_id=end_latent_id,
-                num_branches=NUM_BRANCHES,
                 temperature=TEMPERATURE,
                 top_p=TOP_P,
                 max_new_tokens=MAX_NEW_TOKENS,
                 device=device,
                 noise_type=NOISE_TYPE,
-                noise_direction=NOISE_DIRECTION,
                 benchmark=BENCHMARK
             )
 
@@ -451,32 +382,20 @@ def run_quick_test():
                 expected_answer = extract_answer(q_data["answer"], BENCHMARK)
                 is_correct = result["majority_answer"] == expected_answer
 
-                print(f"\n✓ Generation successful!")
-                print(f"\nBranch answers: {result['branch_answers']}")
-                print(f"Vote distribution: {result['vote_distribution']}")
-                print(f"\nMajority vote: {result['majority_answer']}")
-                print(f"Expected: {expected_answer}")
-                print(f"Result: {'✓ CORRECT' if is_correct else '✗ INCORRECT'}")
+                print(f"Majority: {result['majority_answer']}, Diversity: {result['path_diversity']:.2f}, {'✓' if is_correct else '✗'}")
 
-                # Show first branch output as example
-                if result['branch_texts']:
-                    print(f"\nExample output (Branch 1):")
-                    print(f"  {result['branch_texts'][0][:200]}...")
-
-                question_results["noise_tests"].append({
-                    "noise_scale": noise_scale,
-                    "branch_texts": result["branch_texts"],  # Full generated text from each branch
+                question_results["path_tests"].append({
+                    "num_branches": num_branches,
                     "branch_answers": result["branch_answers"],
                     "majority_answer": result["majority_answer"],
                     "vote_distribution": result["vote_distribution"],
-                    "expected_answer": expected_answer,
-                    "is_correct": is_correct,
-                    "num_branches": result["num_branches"]
+                    "path_diversity": result["path_diversity"],
+                    "is_correct": is_correct
                 })
             else:
-                print(f"\n✗ Error: {result['error']}")
-                question_results["noise_tests"].append({
-                    "noise_scale": noise_scale,
+                print(f"✗ Error: {result['error']}")
+                question_results["path_tests"].append({
+                    "num_branches": num_branches,
                     "error": result["error"]
                 })
 
@@ -484,38 +403,66 @@ def run_quick_test():
 
     # Summary
     print("\n" + "="*70)
-    print("TEST SUMMARY")
+    print("RESULTS SUMMARY")
     print("="*70)
 
-    for q_idx, q_result in enumerate(results):
-        print(f"\nQuestion {q_idx + 1}: {q_result['question'][:60]}...")
-        print(f"Expected: {extract_answer(q_result['expected_answer'], BENCHMARK)}")
+    # Compute accuracy and diversity by K
+    path_stats = {}
+    for K in NUM_BRANCHES_LIST:
+        path_stats[K] = {
+            "correct": 0,
+            "total": 0,
+            "diversity_sum": 0.0,
+            "diversity_count": 0
+        }
 
-        for test in q_result["noise_tests"]:
-            noise = test.get("noise_scale", "?")
-            if "majority_answer" in test:
-                majority = test["majority_answer"]
-                correct = "✓" if test.get("is_correct") else "✗"
-                print(f"  Noise={noise}: {correct} Majority={majority}, Votes={test['vote_distribution']}")
-            else:
-                print(f"  Noise={noise}: ✗ Error")
+    for q_result in results:
+        for test in q_result["path_tests"]:
+            if "is_correct" in test:
+                K = test["num_branches"]
+                path_stats[K]["total"] += 1
+                if test["is_correct"]:
+                    path_stats[K]["correct"] += 1
+                path_stats[K]["diversity_sum"] += test["path_diversity"]
+                path_stats[K]["diversity_count"] += 1
+
+    print(f"\nResults by Number of Paths (noise_scale={NOISE_SCALE}):\n")
+    print(f"{'K':<8}{'Accuracy':<15}{'Correct/Total':<18}{'Avg Diversity':<15}")
+    print("-" * 56)
+
+    for K in NUM_BRANCHES_LIST:
+        stats = path_stats[K]
+        if stats["total"] > 0:
+            accuracy = 100 * stats["correct"] / stats["total"]
+            avg_diversity = stats["diversity_sum"] / stats["diversity_count"]
+            print(f"K={K:<5}{accuracy:>6.1f}%{'':<8}{stats['correct']}/{stats['total']}{'':<10}{avg_diversity:.3f}")
+
+    # Find best K
+    best_K = max(NUM_BRANCHES_LIST, key=lambda k: path_stats[k]["correct"] / max(path_stats[k]["total"], 1))
+    best_accuracy = 100 * path_stats[best_K]["correct"] / path_stats[best_K]["total"]
+    best_diversity = path_stats[best_K]["diversity_sum"] / path_stats[best_K]["diversity_count"]
+    
+    print(f"\n→ Best performing K: {best_K} ({best_accuracy:.1f}% accuracy, {best_diversity:.3f} diversity)")
 
     # Save results
     model_name_safe = MODEL_NAME.replace('/', '_')
-    output_file = f"noisy_coconut_{BENCHMARK}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_file = f"focused_paths_comparison_{BENCHMARK}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
     with open(output_file, 'w') as f:
         json.dump({
             "config": {
                 "benchmark": BENCHMARK,
                 "model": MODEL_NAME,
                 "num_questions": NUM_QUESTIONS,
-                "num_branches": NUM_BRANCHES,
-                "noise_scales": NOISE_SCALES,
+                "num_branches_list": NUM_BRANCHES_LIST,
+                "noise_scale": NOISE_SCALE,
                 "noise_type": NOISE_TYPE,
+                "noise_at_step": NOISE_AT_STEP,
                 "temperature": TEMPERATURE,
                 "top_p": TOP_P
             },
-            "results": results
+            "results": results,
+            "path_stats": path_stats
         }, f, indent=2)
 
     print(f"\n✓ Results saved to: {output_file}")
@@ -525,9 +472,8 @@ def run_quick_test():
 
 
 if __name__ == "__main__":
-    # Allow overriding NUM_QUESTIONS from command line
     if len(sys.argv) > 1:
         NUM_QUESTIONS = int(sys.argv[1])
         print(f"Overriding NUM_QUESTIONS to {NUM_QUESTIONS} from command line")
 
-    run_quick_test()
+    run_focused_test()

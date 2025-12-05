@@ -184,6 +184,7 @@ class Coconut(nn.Module):
         start_latent_id: int,
         end_latent_id: int,
         eos_token_id: int,
+        hidden_layer_idx: int = -1
     ) -> None:
         """
         Initialize the Coconut model wrapper.
@@ -202,6 +203,7 @@ class Coconut(nn.Module):
         self.eos_token_id: int = eos_token_id
         self.start_latent_id: int = start_latent_id
         self.end_latent_id: int = end_latent_id
+        self.hidden_layer_idx: int = hidden_layer_idx
 
         # tested with GPT2 and Llama3
         if isinstance(self.base_causallm, GPT2LMHeadModel):
@@ -400,7 +402,7 @@ class Coconut(nn.Module):
 
             # Extract last hidden layer (final transformer layer output)
             # This is the "continuous thought" representation that gets fed back
-            hidden_states: torch.Tensor = outputs.hidden_states[-1]
+            hidden_states: torch.Tensor = outputs.hidden_states[self.hidden_layer_idx]
 
             # Step 4b: Apply noise
             # Note: This adds noise to the last hidden layer output of latent passes
@@ -483,14 +485,17 @@ class Coconut(nn.Module):
 
         return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits)
 
-    def train(self) -> None:
+    def train(self, mode: bool = True) -> "Coconut":
         """Set the model to training mode."""
-        self.base_causallm.train()
+        super().train(mode)
+        self.base_causallm.train(mode)
+        return self
 
-    def eval(self) -> None:
+    def eval(self) -> "Coconut":
         """Set the model to evaluation mode."""
-        self.base_causallm.eval()
+        return self.train(False)
 
+    @torch.no_grad()
     def generate_with_branching(
         self,
         input_ids: torch.Tensor,
@@ -502,16 +507,17 @@ class Coconut(nn.Module):
         noise_scale: float = 0.0,
         noise_type: str = "gaussian",
         noise_direction: Optional[str] = None,
+        noise_at_step: int = 1, 
         **kwargs
     ) -> List[torch.Tensor]:
         """
-        Generate N diverse sequences by branching after the first noisy latent pass.
+        Generate N diverse sequences by branching after a specified noisy latent pass.
 
         Architecture:
-        1. First latent pass completes
-        2. Apply noise to the resulting embedding
+        1. Run latent passes 1 through (noise_at_step - 1) without branching
+        2. At latent pass noise_at_step, apply noise to the resulting embedding
         3. Branch into N copies of this noisy embedding
-        4. Each branch independently continues through remaining 7 latent passes
+        4. Each branch independently continues through remaining latent passes
         5. Each branch independently generates autoregressively
 
         Args:
@@ -521,17 +527,19 @@ class Coconut(nn.Module):
             num_branches: Number of branches (N)
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
-            noise_scale: Noise to apply after first latent pass
+            noise_scale: Noise to apply at specified latent pass
             noise_type: Type of noise distribution
             noise_direction: Direction for directional noise
+            noise_at_step: Which latent pass to apply noise at (1-8, default=1)
 
         Returns:
             List of N generated token sequences
         """
         assert input_ids.shape[0] == 1, "only support batch_size == 1"
+        assert 1 <= noise_at_step <= MAX_N_LATENT, f"noise_at_step must be between 1 and {MAX_N_LATENT}"
         device = input_ids.device
 
-        print(f"\n=== Branching Generation (N={num_branches}, noise={noise_scale}) ===")
+        print(f"\n=== Branching Generation (N={num_branches}, noise={noise_scale} at step {noise_at_step}) ===")
 
         # Detect latent tokens
         latent_mask = input_ids == self.latent_token_id
@@ -560,37 +568,77 @@ class Coconut(nn.Module):
         latent_positions = [idx[1].item() for idx in latent_indices if idx[0] == 0]
         max_n_latents = len(latent_positions)
 
-        print(f"Step 1: First latent pass (with noise={noise_scale})...")
-
-        # FIRST LATENT PASS
+        # PHASE 1: Run passes 1 through noise_at_step WITHOUT branching
+        print(f"Step 1: Running latent passes 1-{noise_at_step} (pre-branch)...")
+        
         inputs_embeds = self.embedding(input_ids)
-        next_compute_range = (0, latent_positions[0] if latent_positions else input_ids.shape[1])
+        kv_cache = None
+        
+        for pass_idx in range(noise_at_step):
+            if pass_idx == 0:
+                # First pass
+                next_compute_range = (0, latent_positions[0] if latent_positions else input_ids.shape[1])
+            else:
+                # Subsequent passes
+                next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
+                
+                # Truncate KV cache
+                if kv_cache is not None:
+                    if isinstance(kv_cache, tuple):
+                        cache_obj = DynamicCache()
+                        for layer_idx, (k, v) in enumerate(kv_cache):
+                            k_trunc = k[:, :, :next_compute_range[0], :]
+                            v_trunc = v[:, :, :next_compute_range[0], :]
+                            cache_obj.update(k_trunc, v_trunc, layer_idx)
+                        past_kv = cache_obj
+                    else:
+                        cache_obj = DynamicCache()
+                        for layer_idx in range(len(kv_cache)):
+                            k, v = kv_cache[layer_idx]
+                            k_trunc = k[:, :, :next_compute_range[0], :]
+                            v_trunc = v[:, :, :next_compute_range[0], :]
+                            cache_obj.update(k_trunc, v_trunc, layer_idx)
+                        past_kv = cache_obj
+                else:
+                    past_kv = None
 
-        outputs = self.base_causallm(
-            inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
-            attention_mask=torch.ones(1, next_compute_range[1], device=device),
-            position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
-                                     dtype=torch.long, device=device).unsqueeze(0),
-            output_hidden_states=True,
-            use_cache=True,
-        )
+            # Forward pass
+            if pass_idx == 0:
+                outputs = self.base_causallm(
+                    inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
+                    attention_mask=torch.ones(1, next_compute_range[1], device=device),
+                    position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+                                             dtype=torch.long, device=device).unsqueeze(0),
+                    output_hidden_states=True,
+                    use_cache=True,
+                )
+            else:
+                outputs = self.base_causallm(
+                    inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
+                    attention_mask=torch.ones(1, next_compute_range[1], device=device),
+                    position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+                                             dtype=torch.long, device=device).unsqueeze(0),
+                    past_key_values=past_kv,
+                    output_hidden_states=True,
+                    use_cache=True,
+                )
 
-        hidden_states = outputs.hidden_states[-1]
+            hidden_states = outputs.hidden_states[self.hidden_layer_idx]
+            
+            # Apply noise ONLY at the specified step (just before branching)
+            if pass_idx == noise_at_step - 1 and noise_scale > 0.0:
+                hidden_states, noise_info = apply_noise_to_hidden_states(
+                    hidden_states, noise_scale, noise_type, noise_direction
+                )
+                print(f"  Applied noise at step {noise_at_step}: {noise_info['noise_type']}, scale={noise_scale}")
 
-        # Apply noise to first pass
-        if noise_scale > 0.0:
-            hidden_states, noise_info = apply_noise_to_hidden_states(
-                hidden_states, noise_scale, noise_type, noise_direction
-            )
-            print(f"  Applied noise: {noise_info['noise_type']}, scale={noise_scale}")
+            # Fill latent position with embedding
+            inputs_embeds[0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
+            kv_cache = outputs.past_key_values
 
-        # Fill first latent position with noisy embedding
-        inputs_embeds[0, latent_positions[0], :] = hidden_states[0, -1, :]
-        kv_cache = outputs.past_key_values
-
-        print(f"Step 2: Branching into {num_branches} paths for remaining {max_n_latents-1} latent passes...")
-
-        # BRANCH: Create N independent copies
+        # PHASE 2: BRANCH - Create N independent copies
+        print(f"Step 2: Branching into {num_branches} paths for remaining {max_n_latents - noise_at_step} latent passes...")
+        
         all_branches = []
         for branch_idx in range(num_branches):
             branch_data = {
@@ -600,8 +648,8 @@ class Coconut(nn.Module):
             }
             all_branches.append(branch_data)
 
-        # REMAINING LATENT PASSES (2-8) - each branch independent
-        for pass_idx in range(1, max_n_latents):
+        # PHASE 3: REMAINING LATENT PASSES - each branch independent
+        for pass_idx in range(noise_at_step, max_n_latents):
             for branch_idx, branch in enumerate(all_branches):
                 next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
 
@@ -632,13 +680,13 @@ class Coconut(nn.Module):
                     use_cache=True,
                 )
 
-                hidden_states = outputs.hidden_states[-1]
+                hidden_states = outputs.hidden_states[self.hidden_layer_idx]
                 branch['inputs_embeds'][0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
                 branch['kv_cache'] = outputs.past_key_values
 
         print(f"Step 3: Final pass and autoregressive generation for each branch...")
 
-        # FINAL PASS + AUTOREGRESSIVE GENERATION for each branch
+        # PHASE 4: FINAL PASS + AUTOREGRESSIVE GENERATION for each branch
         all_generated_sequences = []
 
         for branch_idx, branch in enumerate(all_branches):
@@ -710,7 +758,7 @@ class Coconut(nn.Module):
                 new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
                 new_inputs_embeds = torch.cat((new_inputs_embeds, new_token_embed), dim=1)
 
-            generated_sequence = torch.tensor(branch['tokens']).view(1, -1)
+            generated_sequence = torch.tensor(branch['tokens'], device=input_ids.device).view(1, -1)
             all_generated_sequences.append(generated_sequence)
             print(f"{len(branch['tokens']) - input_ids.shape[1]} new tokens")
 
@@ -728,6 +776,7 @@ class Coconut(nn.Module):
                 cloned.update(k.clone(), v.clone(), layer_idx)
             return cloned
 
+    @torch.no_grad()
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -826,6 +875,6 @@ class Coconut(nn.Module):
         # Return results based on output_embedding flag
         if output_embedding:
             # For analysis: return both tokens and final embeddings
-            return torch.tensor(tokens).view(1, -1), new_inputs_embeds
+            return torch.tensor(tokens, device=input_ids.device).view(1, -1), new_inputs_embeds
         else:
             return torch.tensor(tokens).view(1, -1)
