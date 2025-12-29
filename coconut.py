@@ -495,6 +495,276 @@ class Coconut(nn.Module):
         """Set the model to evaluation mode."""
         return self.train(False)
 
+    # @torch.no_grad()
+    # def generate_with_branching(
+    #     self,
+    #     input_ids: torch.Tensor,
+    #     attention_mask: torch.Tensor,
+    #     max_new_tokens: int = 16,
+    #     num_branches: int = 5,
+    #     temperature: float = 0.7,
+    #     top_p: float = 0.9,
+    #     noise_scale: float = 0.0,
+    #     noise_type: str = "gaussian",
+    #     noise_direction: Optional[str] = None,
+    #     noise_at_step: int = 1, 
+    #     **kwargs
+    # ) -> List[torch.Tensor]:
+    #     """
+    #     Generate N diverse sequences by branching after a specified noisy latent pass.
+
+    #     Architecture:
+    #     1. Run latent passes 1 through (noise_at_step - 1) without branching
+    #     2. At latent pass noise_at_step, apply noise to the resulting embedding
+    #     3. Branch into N copies of this noisy embedding
+    #     4. Each branch independently continues through remaining latent passes
+    #     5. Each branch independently generates autoregressively
+
+    #     Args:
+    #         input_ids: Input token IDs. Shape: (1, seq_len)
+    #         attention_mask: Attention mask
+    #         max_new_tokens: Max tokens to generate per branch
+    #         num_branches: Number of branches (N)
+    #         temperature: Sampling temperature
+    #         top_p: Nucleus sampling parameter
+    #         noise_scale: Noise to apply at specified latent pass
+    #         noise_type: Type of noise distribution
+    #         noise_direction: Direction for directional noise
+    #         noise_at_step: Which latent pass to apply noise at (1-8, default=1)
+
+    #     Returns:
+    #         List of N generated token sequences
+    #     """
+    #     assert input_ids.shape[0] == 1, "only support batch_size == 1"
+    #     assert 1 <= noise_at_step <= MAX_N_LATENT, f"noise_at_step must be between 1 and {MAX_N_LATENT}"
+    #     device = input_ids.device
+
+    #     print(f"\n=== Branching Generation (N={num_branches}, noise={noise_scale} at step {noise_at_step}) ===")
+
+    #     # Detect latent tokens
+    #     latent_mask = input_ids == self.latent_token_id
+    #     latent_indices = latent_mask.nonzero()
+
+    #     start_latent_mask = input_ids == self.start_latent_id
+    #     end_latent_mask = input_ids == self.end_latent_id
+    #     start_latent_indices = start_latent_mask.nonzero()
+    #     end_latent_indices = end_latent_mask.nonzero()
+
+    #     has_latent_markers = len(start_latent_indices) > 0 and len(end_latent_indices) > 0
+
+    #     # Expand to 8 virtual latent tokens if using TRUE METHOD
+    #     if has_latent_markers:
+    #         start_pos = start_latent_indices[0][1].item()
+
+    #         before_start = input_ids[0, :start_pos + 1]
+    #         after_start = input_ids[0, start_pos + 1:]
+    #         virtual_latents = torch.full((MAX_N_LATENT,), self.latent_token_id,
+    #                                     dtype=input_ids.dtype, device=device)
+    #         input_ids = torch.cat([before_start, virtual_latents, after_start]).unsqueeze(0)
+
+    #         latent_mask = input_ids == self.latent_token_id
+    #         latent_indices = latent_mask.nonzero()
+
+    #     latent_positions = [idx[1].item() for idx in latent_indices if idx[0] == 0]
+    #     max_n_latents = len(latent_positions)
+
+    #     # PHASE 1: Run passes 1 through noise_at_step WITHOUT branching
+    #     print(f"Step 1: Running latent passes 1-{noise_at_step} (pre-branch)...")
+        
+    #     inputs_embeds = self.embedding(input_ids)
+    #     kv_cache = None
+        
+    #     for pass_idx in range(noise_at_step):
+    #         if pass_idx == 0:
+    #             # First pass
+    #             next_compute_range = (0, latent_positions[0] if latent_positions else input_ids.shape[1])
+    #         else:
+    #             # Subsequent passes
+    #             next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
+                
+    #             # Truncate KV cache
+    #             if kv_cache is not None:
+    #                 if isinstance(kv_cache, tuple):
+    #                     cache_obj = DynamicCache()
+    #                     for layer_idx, (k, v) in enumerate(kv_cache):
+    #                         k_trunc = k[:, :, :next_compute_range[0], :]
+    #                         v_trunc = v[:, :, :next_compute_range[0], :]
+    #                         cache_obj.update(k_trunc, v_trunc, layer_idx)
+    #                     past_kv = cache_obj
+    #                 else:
+    #                     cache_obj = DynamicCache()
+    #                     for layer_idx in range(len(kv_cache)):
+    #                         k, v = kv_cache[layer_idx]
+    #                         k_trunc = k[:, :, :next_compute_range[0], :]
+    #                         v_trunc = v[:, :, :next_compute_range[0], :]
+    #                         cache_obj.update(k_trunc, v_trunc, layer_idx)
+    #                     past_kv = cache_obj
+    #             else:
+    #                 past_kv = None
+
+    #         # Forward pass
+    #         if pass_idx == 0:
+    #             outputs = self.base_causallm(
+    #                 inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
+    #                 attention_mask=torch.ones(1, next_compute_range[1], device=device),
+    #                 position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+    #                                          dtype=torch.long, device=device).unsqueeze(0),
+    #                 output_hidden_states=True,
+    #                 use_cache=True,
+    #             )
+    #         else:
+    #             outputs = self.base_causallm(
+    #                 inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
+    #                 attention_mask=torch.ones(1, next_compute_range[1], device=device),
+    #                 position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+    #                                          dtype=torch.long, device=device).unsqueeze(0),
+    #                 past_key_values=past_kv,
+    #                 output_hidden_states=True,
+    #                 use_cache=True,
+    #             )
+
+    #         hidden_states = outputs.hidden_states[self.hidden_layer_idx]
+            
+    #         # Apply noise ONLY at the specified step (just before branching)
+    #         if pass_idx == noise_at_step - 1 and noise_scale > 0.0:
+    #             hidden_states, noise_info = apply_noise_to_hidden_states(
+    #                 hidden_states, noise_scale, noise_type, noise_direction
+    #             )
+    #             print(f"  Applied noise at step {noise_at_step}: {noise_info['noise_type']}, scale={noise_scale}")
+
+    #         # Fill latent position with embedding
+    #         inputs_embeds[0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
+    #         kv_cache = outputs.past_key_values
+
+    #     # PHASE 2: BRANCH - Create N independent copies
+    #     print(f"Step 2: Branching into {num_branches} paths for remaining {max_n_latents - noise_at_step} latent passes...")
+        
+    #     all_branches = []
+    #     for branch_idx in range(num_branches):
+    #         branch_data = {
+    #             'inputs_embeds': inputs_embeds.clone(),
+    #             'kv_cache': self._clone_kv_cache(kv_cache),
+    #             'tokens': input_ids[0].detach().tolist()
+    #         }
+    #         all_branches.append(branch_data)
+
+    #     # PHASE 3: REMAINING LATENT PASSES - each branch independent
+    #     for pass_idx in range(noise_at_step, max_n_latents):
+    #         for branch_idx, branch in enumerate(all_branches):
+    #             next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
+
+    #             # Truncate KV cache
+    #             if isinstance(branch['kv_cache'], tuple):
+    #                 cache_obj = DynamicCache()
+    #                 for layer_idx, (k, v) in enumerate(branch['kv_cache']):
+    #                     k_trunc = k[:, :, :next_compute_range[0], :]
+    #                     v_trunc = v[:, :, :next_compute_range[0], :]
+    #                     cache_obj.update(k_trunc, v_trunc, layer_idx)
+    #                 past_kv = cache_obj
+    #             else:
+    #                 cache_obj = DynamicCache()
+    #                 for layer_idx in range(len(branch['kv_cache'])):
+    #                     k, v = branch['kv_cache'][layer_idx]
+    #                     k_trunc = k[:, :, :next_compute_range[0], :]
+    #                     v_trunc = v[:, :, :next_compute_range[0], :]
+    #                     cache_obj.update(k_trunc, v_trunc, layer_idx)
+    #                 past_kv = cache_obj
+
+    #             outputs = self.base_causallm(
+    #                 inputs_embeds=branch['inputs_embeds'][:, next_compute_range[0]:next_compute_range[1], :],
+    #                 attention_mask=torch.ones(1, next_compute_range[1], device=device),
+    #                 position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+    #                                          dtype=torch.long, device=device).unsqueeze(0),
+    #                 past_key_values=past_kv,
+    #                 output_hidden_states=True,
+    #                 use_cache=True,
+    #             )
+
+    #             hidden_states = outputs.hidden_states[self.hidden_layer_idx]
+    #             branch['inputs_embeds'][0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
+    #             branch['kv_cache'] = outputs.past_key_values
+
+    #     print(f"Step 3: Final pass and autoregressive generation for each branch...")
+
+    #     # PHASE 4: FINAL PASS + AUTOREGRESSIVE GENERATION for each branch
+    #     all_generated_sequences = []
+
+    #     for branch_idx, branch in enumerate(all_branches):
+    #         print(f"  Branch {branch_idx + 1}/{num_branches}...", end=" ")
+
+    #         # Final forward pass
+    #         next_compute_range = (latent_positions[-1], input_ids.shape[1])
+
+    #         if isinstance(branch['kv_cache'], tuple):
+    #             cache_obj = DynamicCache()
+    #             for layer_idx, (k, v) in enumerate(branch['kv_cache']):
+    #                 k_trunc = k[:, :, :next_compute_range[0], :]
+    #                 v_trunc = v[:, :, :next_compute_range[0], :]
+    #                 cache_obj.update(k_trunc, v_trunc, layer_idx)
+    #             past_kv = cache_obj
+    #         else:
+    #             cache_obj = DynamicCache()
+    #             for layer_idx in range(len(branch['kv_cache'])):
+    #                 k, v = branch['kv_cache'][layer_idx]
+    #                 k_trunc = k[:, :, :next_compute_range[0], :]
+    #                 v_trunc = v[:, :, :next_compute_range[0], :]
+    #                 cache_obj.update(k_trunc, v_trunc, layer_idx)
+    #             past_kv = cache_obj
+
+    #         outputs = self.base_causallm(
+    #             inputs_embeds=branch['inputs_embeds'][:, next_compute_range[0]:next_compute_range[1], :],
+    #             attention_mask=torch.ones(1, input_ids.shape[1], device=device),
+    #             position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
+    #                                      dtype=torch.long, device=device).unsqueeze(0),
+    #             past_key_values=past_kv,
+    #             output_hidden_states=True,
+    #         )
+
+    #         # Sample first token
+    #         logits = outputs.logits[0, -1] / temperature
+    #         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    #         cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+    #         sorted_indices_to_remove = cumulative_probs > top_p
+    #         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    #         sorted_indices_to_remove[..., 0] = 0
+    #         indices_to_remove = sorted_indices[sorted_indices_to_remove]
+    #         logits[indices_to_remove] = float('-inf')
+    #         probs = torch.softmax(logits, dim=-1)
+    #         next_token = torch.multinomial(probs, num_samples=1).item()
+
+    #         branch['tokens'].append(next_token)
+    #         new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
+    #         new_inputs_embeds = torch.cat((branch['inputs_embeds'], new_token_embed), dim=1)
+
+    #         # Autoregressive generation
+    #         for _ in range(max_new_tokens - 1):
+    #             outputs = self.base_causallm(inputs_embeds=new_inputs_embeds)
+    #             logits = outputs.logits[0, -1] / temperature
+
+    #             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    #             cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+    #             sorted_indices_to_remove = cumulative_probs > top_p
+    #             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    #             sorted_indices_to_remove[..., 0] = 0
+    #             indices_to_remove = sorted_indices[sorted_indices_to_remove]
+    #             logits[indices_to_remove] = float('-inf')
+    #             probs = torch.softmax(logits, dim=-1)
+    #             next_token = torch.multinomial(probs, num_samples=1).item()
+
+    #             if next_token == self.eos_token_id:
+    #                 break
+
+    #             branch['tokens'].append(next_token)
+    #             new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
+    #             new_inputs_embeds = torch.cat((new_inputs_embeds, new_token_embed), dim=1)
+
+    #         generated_sequence = torch.tensor(branch['tokens'], device=input_ids.device).view(1, -1)
+    #         all_generated_sequences.append(generated_sequence)
+    #         print(f"{len(branch['tokens']) - input_ids.shape[1]} new tokens")
+
+    #     print(f"=== Completed {num_branches} branches ===\n")
+    #     return all_generated_sequences
+
     @torch.no_grad()
     def generate_with_branching(
         self,
@@ -507,38 +777,24 @@ class Coconut(nn.Module):
         noise_scale: float = 0.0,
         noise_type: str = "gaussian",
         noise_direction: Optional[str] = None,
-        noise_at_step: int = 1, 
+        noise_at_step: int = 1,
+        model_name: str = "",
         **kwargs
     ) -> List[torch.Tensor]:
         """
         Generate N diverse sequences by branching after a specified noisy latent pass.
-
-        Architecture:
-        1. Run latent passes 1 through (noise_at_step - 1) without branching
-        2. At latent pass noise_at_step, apply noise to the resulting embedding
-        3. Branch into N copies of this noisy embedding
-        4. Each branch independently continues through remaining latent passes
-        5. Each branch independently generates autoregressively
-
-        Args:
-            input_ids: Input token IDs. Shape: (1, seq_len)
-            attention_mask: Attention mask
-            max_new_tokens: Max tokens to generate per branch
-            num_branches: Number of branches (N)
-            temperature: Sampling temperature
-            top_p: Nucleus sampling parameter
-            noise_scale: Noise to apply at specified latent pass
-            noise_type: Type of noise distribution
-            noise_direction: Direction for directional noise
-            noise_at_step: Which latent pass to apply noise at (1-8, default=1)
-
-        Returns:
-            List of N generated token sequences
+        
+        Handles sliding window attention models (like gpt-oss) by avoiding KV cache
+        when sequence length exceeds the window size.
         """
         assert input_ids.shape[0] == 1, "only support batch_size == 1"
         assert 1 <= noise_at_step <= MAX_N_LATENT, f"noise_at_step must be between 1 and {MAX_N_LATENT}"
         device = input_ids.device
 
+        # Detect model type and constraints
+        is_gpt_oss = "gpt-oss" in model_name.lower()
+        SLIDING_WINDOW_SIZE = 128  # gpt-oss sliding window size
+        
         print(f"\n=== Branching Generation (N={num_branches}, noise={noise_scale} at step {noise_at_step}) ===")
 
         # Detect latent tokens
@@ -567,157 +823,149 @@ class Coconut(nn.Module):
 
         latent_positions = [idx[1].item() for idx in latent_indices if idx[0] == 0]
         max_n_latents = len(latent_positions)
+        
+        # Determine if we need to disable KV caching due to sliding window
+        first_latent_pos = latent_positions[0] if latent_positions else 0
+        use_kv_cache = not (is_gpt_oss and first_latent_pos >= SLIDING_WINDOW_SIZE)
+        
+        if is_gpt_oss and not use_kv_cache:
+            print(f"  [gpt-oss: sequence length {first_latent_pos} >= {SLIDING_WINDOW_SIZE}, disabling KV cache]")
 
+        # ========================================================================
         # PHASE 1: Run passes 1 through noise_at_step WITHOUT branching
+        # ========================================================================
         print(f"Step 1: Running latent passes 1-{noise_at_step} (pre-branch)...")
         
         inputs_embeds = self.embedding(input_ids)
-        kv_cache = None
         
         for pass_idx in range(noise_at_step):
-            if pass_idx == 0:
-                # First pass
-                next_compute_range = (0, latent_positions[0] if latent_positions else input_ids.shape[1])
-            else:
-                # Subsequent passes
-                next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
-                
-                # Truncate KV cache
-                if kv_cache is not None:
-                    if isinstance(kv_cache, tuple):
-                        cache_obj = DynamicCache()
-                        for layer_idx, (k, v) in enumerate(kv_cache):
-                            k_trunc = k[:, :, :next_compute_range[0], :]
-                            v_trunc = v[:, :, :next_compute_range[0], :]
-                            cache_obj.update(k_trunc, v_trunc, layer_idx)
-                        past_kv = cache_obj
-                    else:
-                        cache_obj = DynamicCache()
-                        for layer_idx in range(len(kv_cache)):
-                            k, v = kv_cache[layer_idx]
-                            k_trunc = k[:, :, :next_compute_range[0], :]
-                            v_trunc = v[:, :, :next_compute_range[0], :]
-                            cache_obj.update(k_trunc, v_trunc, layer_idx)
-                        past_kv = cache_obj
+            if use_kv_cache:
+                # Standard KV-cached approach for short sequences
+                if pass_idx == 0:
+                    next_compute_range = (0, latent_positions[0])
+                    outputs = self.base_causallm(
+                        inputs_embeds=inputs_embeds[:, :next_compute_range[1], :],
+                        attention_mask=torch.ones(1, next_compute_range[1], device=device),
+                        position_ids=torch.arange(0, next_compute_range[1], dtype=torch.long, device=device).unsqueeze(0),
+                        output_hidden_states=True,
+                        use_cache=True,
+                    )
+                    kv_cache = outputs.past_key_values
                 else:
-                    past_kv = None
-
-            # Forward pass
-            if pass_idx == 0:
-                outputs = self.base_causallm(
-                    inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
-                    attention_mask=torch.ones(1, next_compute_range[1], device=device),
-                    position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
-                                             dtype=torch.long, device=device).unsqueeze(0),
-                    output_hidden_states=True,
-                    use_cache=True,
-                )
+                    # Use cached computation
+                    next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
+                    
+                    # Get actual cache length
+                    if isinstance(kv_cache, tuple):
+                        cache_len = kv_cache[0][0].shape[2]
+                    else:
+                        k, _ = kv_cache[0]
+                        cache_len = k.shape[2]
+                    
+                    # Truncate cache if needed
+                    target_len = next_compute_range[0]
+                    if cache_len > target_len:
+                        if isinstance(kv_cache, tuple):
+                            cache_obj = DynamicCache()
+                            for layer_idx, (k, v) in enumerate(kv_cache):
+                                cache_obj.update(k[:, :, :target_len, :], v[:, :, :target_len, :], layer_idx)
+                            past_kv = cache_obj
+                            cache_len = target_len
+                        else:
+                            cache_obj = DynamicCache()
+                            for layer_idx in range(len(kv_cache)):
+                                k, v = kv_cache[layer_idx]
+                                cache_obj.update(k[:, :, :target_len, :], v[:, :, :target_len, :], layer_idx)
+                            past_kv = cache_obj
+                            cache_len = target_len
+                    else:
+                        past_kv = kv_cache
+                    
+                    new_seq_len = next_compute_range[1] - next_compute_range[0]
+                    
+                    outputs = self.base_causallm(
+                        inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
+                        attention_mask=torch.ones(1, cache_len + new_seq_len, device=device),
+                        position_ids=torch.arange(next_compute_range[0], next_compute_range[1], dtype=torch.long, device=device).unsqueeze(0),
+                        past_key_values=past_kv,
+                        output_hidden_states=True,
+                        use_cache=True,
+                    )
+                    kv_cache = outputs.past_key_values
             else:
+                # No KV cache - recompute full sequence each time (for sliding window models)
+                end_pos = latent_positions[pass_idx]
                 outputs = self.base_causallm(
-                    inputs_embeds=inputs_embeds[:, next_compute_range[0]:next_compute_range[1], :],
-                    attention_mask=torch.ones(1, next_compute_range[1], device=device),
-                    position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
-                                             dtype=torch.long, device=device).unsqueeze(0),
-                    past_key_values=past_kv,
+                    inputs_embeds=inputs_embeds[:, :end_pos, :],
+                    attention_mask=torch.ones(1, end_pos, device=device),
+                    position_ids=torch.arange(0, end_pos, dtype=torch.long, device=device).unsqueeze(0),
                     output_hidden_states=True,
-                    use_cache=True,
+                    use_cache=False,
                 )
 
             hidden_states = outputs.hidden_states[self.hidden_layer_idx]
             
-            # Apply noise ONLY at the specified step (just before branching)
+            # Apply noise ONLY at the specified step
             if pass_idx == noise_at_step - 1 and noise_scale > 0.0:
                 hidden_states, noise_info = apply_noise_to_hidden_states(
                     hidden_states, noise_scale, noise_type, noise_direction
                 )
                 print(f"  Applied noise at step {noise_at_step}: {noise_info['noise_type']}, scale={noise_scale}")
 
-            # Fill latent position with embedding
+            # Fill latent position with hidden state
             inputs_embeds[0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
-            kv_cache = outputs.past_key_values
 
+        # ========================================================================
         # PHASE 2: BRANCH - Create N independent copies
+        # ========================================================================
         print(f"Step 2: Branching into {num_branches} paths for remaining {max_n_latents - noise_at_step} latent passes...")
         
         all_branches = []
         for branch_idx in range(num_branches):
             branch_data = {
                 'inputs_embeds': inputs_embeds.clone(),
-                'kv_cache': self._clone_kv_cache(kv_cache),
                 'tokens': input_ids[0].detach().tolist()
             }
             all_branches.append(branch_data)
 
-        # PHASE 3: REMAINING LATENT PASSES - each branch independent
+        # ========================================================================
+        # PHASE 3: REMAINING LATENT PASSES - each branch independent (NO KV CACHE for gpt-oss)
+        # ========================================================================
         for pass_idx in range(noise_at_step, max_n_latents):
             for branch_idx, branch in enumerate(all_branches):
-                next_compute_range = (latent_positions[pass_idx-1], latent_positions[pass_idx])
-
-                # Truncate KV cache
-                if isinstance(branch['kv_cache'], tuple):
-                    cache_obj = DynamicCache()
-                    for layer_idx, (k, v) in enumerate(branch['kv_cache']):
-                        k_trunc = k[:, :, :next_compute_range[0], :]
-                        v_trunc = v[:, :, :next_compute_range[0], :]
-                        cache_obj.update(k_trunc, v_trunc, layer_idx)
-                    past_kv = cache_obj
-                else:
-                    cache_obj = DynamicCache()
-                    for layer_idx in range(len(branch['kv_cache'])):
-                        k, v = branch['kv_cache'][layer_idx]
-                        k_trunc = k[:, :, :next_compute_range[0], :]
-                        v_trunc = v[:, :, :next_compute_range[0], :]
-                        cache_obj.update(k_trunc, v_trunc, layer_idx)
-                    past_kv = cache_obj
-
+                end_pos = latent_positions[pass_idx]
+                
+                # Always recompute full sequence for gpt-oss (due to sliding window)
+                # For other models, could optimize with KV cache
                 outputs = self.base_causallm(
-                    inputs_embeds=branch['inputs_embeds'][:, next_compute_range[0]:next_compute_range[1], :],
-                    attention_mask=torch.ones(1, next_compute_range[1], device=device),
-                    position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
-                                             dtype=torch.long, device=device).unsqueeze(0),
-                    past_key_values=past_kv,
+                    inputs_embeds=branch['inputs_embeds'][:, :end_pos, :],
+                    attention_mask=torch.ones(1, end_pos, device=device),
+                    position_ids=torch.arange(0, end_pos, dtype=torch.long, device=device).unsqueeze(0),
                     output_hidden_states=True,
-                    use_cache=True,
+                    use_cache=False,
                 )
 
                 hidden_states = outputs.hidden_states[self.hidden_layer_idx]
                 branch['inputs_embeds'][0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
-                branch['kv_cache'] = outputs.past_key_values
 
         print(f"Step 3: Final pass and autoregressive generation for each branch...")
 
-        # PHASE 4: FINAL PASS + AUTOREGRESSIVE GENERATION for each branch
+        # ========================================================================
+        # PHASE 4: FINAL PASS + AUTOREGRESSIVE GENERATION
+        # ========================================================================
         all_generated_sequences = []
 
         for branch_idx, branch in enumerate(all_branches):
             print(f"  Branch {branch_idx + 1}/{num_branches}...", end=" ")
 
-            # Final forward pass
-            next_compute_range = (latent_positions[-1], input_ids.shape[1])
-
-            if isinstance(branch['kv_cache'], tuple):
-                cache_obj = DynamicCache()
-                for layer_idx, (k, v) in enumerate(branch['kv_cache']):
-                    k_trunc = k[:, :, :next_compute_range[0], :]
-                    v_trunc = v[:, :, :next_compute_range[0], :]
-                    cache_obj.update(k_trunc, v_trunc, layer_idx)
-                past_kv = cache_obj
-            else:
-                cache_obj = DynamicCache()
-                for layer_idx in range(len(branch['kv_cache'])):
-                    k, v = branch['kv_cache'][layer_idx]
-                    k_trunc = k[:, :, :next_compute_range[0], :]
-                    v_trunc = v[:, :, :next_compute_range[0], :]
-                    cache_obj.update(k_trunc, v_trunc, layer_idx)
-                past_kv = cache_obj
-
+            # Final forward pass - full sequence
+            seq_len = input_ids.shape[1]
             outputs = self.base_causallm(
-                inputs_embeds=branch['inputs_embeds'][:, next_compute_range[0]:next_compute_range[1], :],
-                attention_mask=torch.ones(1, input_ids.shape[1], device=device),
-                position_ids=torch.arange(next_compute_range[0], next_compute_range[1],
-                                         dtype=torch.long, device=device).unsqueeze(0),
-                past_key_values=past_kv,
+                inputs_embeds=branch['inputs_embeds'][:, :seq_len, :],
+                attention_mask=torch.ones(1, seq_len, device=device),
+                position_ids=torch.arange(0, seq_len, dtype=torch.long, device=device).unsqueeze(0),
                 output_hidden_states=True,
+                use_cache=False,
             )
 
             # Sample first token
