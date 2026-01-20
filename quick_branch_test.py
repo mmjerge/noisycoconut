@@ -325,6 +325,8 @@ def majority_vote(answers: List[str]) -> str:
     most_common = vote_counts.most_common(1)[0][0]
     return most_common
 
+def new_aggregation():
+    pass
 
 def test_question_with_branching(
     coconut_model,
