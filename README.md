@@ -2,7 +2,7 @@
 
 **Counterfactual Consensus via Latent Space Reasoning**
 
-![NoisyCoconut Logo](./assets/noisy_coconut_diagram.png)
+![NoisyCoconut Diagram](./assets/noisy_coconut_diagram.png)
 
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
@@ -12,36 +12,36 @@ NoisyCoconut is a training-free inference-time method that enhances large langua
 
 - **No Retraining Required**: Operates directly on model representations during inference
 - **Coverage-Accuracy Tradeoffs**: Enables selective prediction through agreement-based confidence estimation
-- **Significant Error Reduction**: Unanimous agreement among noise-perturbed paths reduces error rates from 40–70% to below 15%
+- **Significant Error Reduction**: Unanimous agreement among noise-perturbed paths reduces error rates from 40-70% to below 15%
 - **Model Agnostic**: Works across multiple LLM architectures (Qwen, Llama, Mixtral, DeepSeek, GPT-oss)
 
 ## How It Works
 
-1. **Noise Injection**: Sample random noise from a Gaussian distribution and inject it into the last hidden layer of the first forward pass
-2. **Path Generation**: Create K diverse reasoning paths from a common initial state
+1. **Noise Injection**: Sample random noise from a configurable distribution and inject it into the last hidden layer during latent reasoning passes
+2. **Path Generation**: Create K diverse reasoning paths from a common initial state via branching
 3. **Output Aggregation**: Use majority voting to produce a consensus output or abstain when paths disagree
-
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/noisycoconut.git
+git clone https://github.com/mmjerge/noisycoconut.git
 cd noisycoconut
 pip install -r requirements.txt
+```
 
-Requirements
+### Requirements
 
-    Python >= 3.8
-    PyTorch >= 2.0
-    Transformers >= 4.35
+- Python >= 3.8
+- PyTorch >= 2.5
+- Transformers >= 4.46
+- CUDA-compatible GPU (recommended)
 
-Quick Start
+## Quick Start
 
-python quick_branch_test.py                           # Use default config.yaml
-python quick_branch_test.py --config my_config.yaml   # Custom config file
-python quick_branch_test.py experiment.num_questions=50  # CLI overrides
+### Download Benchmark Datasets
 
-# Download all benchmarks to ./data
+```bash
+# Download all benchmarks (GSM8K, GSM-Symbolic, MMLU) to ./data
 python data.py
 
 # Download to a specific directory
@@ -55,153 +55,176 @@ python data.py --force
 
 # Show stats about downloaded data
 python data.py --stats
+```
 
-from noisy_coconut import NoisyCoconut
+### Run Experiments
 
-# Initialize with your model
-model = NoisyCoconut(
-    model_name="Qwen/Qwen2.5-7B-Instruct",
-    num_paths=5,           # K reasoning paths
-    noise_scale=0.2,       # σ_0
-    max_latent_steps=8     # Maximum thinking steps
-)
+```bash
+# Run with default configuration (args/noisy-coconut.yaml)
+python run.py --config args/noisy-coconut.yaml
 
-# Run inference with confidence estimation
-result = model.generate(
-    prompt="What is 15% of 80?",
-    confidence_threshold="4/5"  # Require 4/5 agreement
-)
+# Override configuration via CLI
+python run.py --config args/noisy-coconut.yaml experiment.num_questions=50
 
-print(f"Answer: {result.answer}")
-print(f"Confidence: {result.agreement_level}")
-print(f"Abstain: {result.abstain}")
+# Run with custom config file
+python run.py --config my_config.yaml
+```
 
-Configuration
-Key Hyperparameters
-Parameter	Default	Description
+## Configuration
 
-num_paths
+Configuration is managed via YAML files. The default configuration is in `args/noisy-coconut.yaml`:
 
-(K)	5	Number of reasoning paths to generate
+```yaml
+benchmark: "gsm8k"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
 
-noise_scale
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  max_new_tokens: 2056
 
-(σ₀)	0.2	Initial noise scale (ratio of noise norm to hidden state norm)
+experiment:
+  num_questions: 1000
+  num_branches: 5       # K reasoning paths
+  random_seed: 42
 
-decay_rate
+noise:
+  scales: [0.2]         # Noise scale values to test
+  type: "gaussian_scaled"  # Noise type
+  direction: null       # Direction for targeted noise
 
-(λ)	1.0	Exponential decay rate for noise
+sampling:
+  temperature: 0.7
+  top_p: 0.9
 
-max_latent_steps
+checkpoint:
+  interval: 100         # Save progress every N questions
 
-	8	Maximum continuous latent thinking steps
+output_dir: "~/results"
+```
 
-ema_alpha
+### Noise Types
 
-(α)	0.9	EMA coefficient for adaptive noise scaling
-Confidence Thresholds
+| Type | Description |
+|------|-------------|
+| `gaussian` | Standard Gaussian noise N(0, scale^2) |
+| `gaussian_scaled` | Gaussian noise scaled to match hidden state norm |
+| `snr` | Signal-to-Noise Ratio based noise |
+| `uniform` | Uniform noise in [-scale, scale] |
+| `orthogonal` | Noise orthogonal to hidden state direction |
+| `targeted` | Noise in the direction of hidden state (amplifies/dampens) |
+| `dropout` | Randomly zero out elements with probability = scale |
 
-    Unanimous (5/5): Highest accuracy, lowest coverage
-    Strong Majority (4/5): High accuracy with moderate coverage
-    Moderate Majority (3/5): Balanced tradeoff
-    Minimal Plurality (2/5): Higher coverage, lower accuracy
+### Confidence Thresholds
+
+- **Unanimous (5/5)**: Highest accuracy, lowest coverage
+- **Strong Majority (4/5)**: High accuracy with moderate coverage
+- **Moderate Majority (3/5)**: Balanced tradeoff
+- **Minimal Plurality (2/5)**: Higher coverage, lower accuracy
+
+## Benchmarks
 
 We evaluate on three benchmarks:
 
-    GSM8K: Grade-school math word problems
-    GSM-Symbolic: Symbolic variant of GSM8K
-    MMLU: Massive Multitask Language Understanding
+- **GSM8K**: Grade-school math word problems
+- **GSM-Symbolic**: Symbolic variant of GSM8K
+- **MMLU**: Massive Multitask Language Understanding
 
-from noisy_coconut import NoisyCoconut
+## Project Structure
 
-model = NoisyCoconut("Qwen/Qwen2.5-7B-Instruct")
-
-# Single query
-result = model.generate("Solve: 2x + 5 = 15")
-
-Batch Evaluation
-
-from noisy_coconut import NoisyCoconut, evaluate_benchmark
-
-model = NoisyCoconut("Qwen/Qwen2.5-7B-Instruct")
-
-# Evaluate on GSM8K
-results = evaluate_benchmark(
-    model=model,
-    benchmark="gsm8k",
-    num_samples=1000,
-    confidence_thresholds=["2/5", "3/5", "4/5", "5/5"]
-)
-
-# Print coverage-accuracy tradeoff
-for threshold, metrics in results.items():
-    print(f"{threshold}: Accuracy={metrics['accuracy']:.1%}, Coverage={metrics['coverage']:.1%}")
-
-Custom Noise Configuration
-
-model = NoisyCoconut(
-    model_name="Qwen/Qwen2.5-7B-Instruct",
-    num_paths=10,
-    noise_scale=0.3,
-    decay_rate=0.5,
-    adaptive_noise=True
-)
-
-Project Structure
-
-noisy-coconut/
-├── noisy_coconut/
-│   ├── __init__.py
-│   ├── model.py           # Main NoisyCoconut class
-│   ├── noise.py           # Noise injection utilities
-│   ├── aggregation.py     # Output aggregation strategies
-│   └── utils.py           # Helper functions
+```
+noisycoconut/
+├── coconut.py              # Core Coconut model with noise injection
+├── run.py                  # Main experiment runner with branching & voting
+├── data.py                 # Dataset downloading and processing utilities
+├── requirements.txt        # Python dependencies
+├── args/
+│   └── noisy-coconut.yaml  # Default configuration
 ├── scripts/
-│   ├── evaluate.py        # Benchmark evaluation
-│   └── noise_analysis.py  # Noise-accuracy characterization
-├── configs/
-│   └── default.yaml       # Default configurations
+│   ├── run_experiment.sh   # SLURM job script for HPC clusters
+│   ├── run_simple_experiment.sh
+│   └── run_branch_experiment.sh
 ├── tests/
-├── requirements.txt
-└── README.md
+│   └── tests.py            # Comprehensive pytest test suite
+├── results/                # Experiment outputs
+└── assets/                 # Diagrams and images
+```
 
-Reproducing Paper Results
-Noise-Accuracy Characterization (Section 4.2)
+## Core Components
 
-python scripts/noise_analysis.py \
-    --model Qwen/Qwen2.5-7B-Instruct \
-    --noise_scales 0.1 0.2 0.5 1.0 2.0 5.0 10.0 20.0 50.0 \
-    --benchmark gsm8k
+### Coconut Model (`coconut.py`)
 
-Main Experiments (Section 4.3)
+The `Coconut` class wraps a base causal language model and implements continuous latent reasoning:
 
-python scripts/evaluate.py \
-    --model Qwen/Qwen2.5-7B-Instruct \
-    --benchmarks gsm8k gsm_symbolic mmlu \
-    --num_paths 5 \
-    --noise_scale 0.2 \
-    --num_samples 1000
+- **Latent Tokens**: Special `<|latent|>`, `<|start-latent|>`, and `<|end-latent|>` tokens mark reasoning regions
+- **TRUE METHOD**: When start/end markers are adjacent, automatically performs 8 latent reasoning passes in continuous hidden state space
+- **Noise Injection**: `apply_noise_to_hidden_states()` supports multiple noise distributions
+- **Branching Generation**: `generate_with_branching()` creates K diverse paths with noise applied at a specified latent step
 
-Limitations
+### Experiment Runner (`run.py`)
 
-    Open-weight models only: Requires access to internal model states
-    Computational overhead: Generates K paths per query (linear scaling)
-    Discrete responses: Best suited for tasks with well-defined answer agreement
-    Architecture sensitivity: Some models (e.g., gpt-oss-20B) require modified configurations
+Handles the full experimental pipeline:
+- Model setup with special token registration
+- Benchmark dataset loading (GSM8K, GSM-Symbolic, MMLU)
+- Branching generation with configurable noise
+- Answer extraction and majority voting
+- Checkpoint/resume support for long experiments
+- Results aggregation and accuracy reporting
 
-Citation
+### Data Utilities (`data.py`)
 
+Provides dataset downloading and preprocessing:
+- Automatic download from HuggingFace datasets
+- Consistent JSON format for all benchmarks
+- Custom collation for latent token padding
+
+## Running on HPC Clusters
+
+For SLURM-based clusters, use the provided script:
+
+```bash
+sbatch scripts/run_experiment.sh
+```
+
+The script configures:
+- Multi-GPU support (4x A100)
+- Mixed precision (fp16)
+- Automatic checkpoint resume
+- Log file management
+
+## Running Tests
+
+```bash
+# Run all tests
+pytest tests/tests.py -v
+
+# Run specific test class
+pytest tests/tests.py::TestApplyNoiseToHiddenStates -v
+
+# Run with coverage
+pytest tests/tests.py --cov=coconut
+```
+
+## Limitations
+
+- **Open-weight models only**: Requires access to internal model states
+- **Computational overhead**: Generates K paths per query (linear scaling)
+- **Discrete responses**: Best suited for tasks with well-defined answer agreement
+- **Architecture sensitivity**: Some models (e.g., gpt-oss-20B) require modified configurations
+
+## Citation
+
+```bibtex
 @article{anonymous2025noisycoconut,
   title={NoisyCoconut: Counterfactual Consensus via Latent Space Reasoning},
   author={Anonymous},
   journal={Transactions on Machine Learning Research},
   year={2025}
 }
+```
 
-License
+## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-Acknowledgments
+## Acknowledgments
 
 This work builds on the Continuous Chain-of-Thought (Coconut) framework from Hao et al. (2025).
