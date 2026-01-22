@@ -37,6 +37,25 @@ Requirements
 
 Quick Start
 
+python quick_branch_test.py                           # Use default config.yaml
+python quick_branch_test.py --config my_config.yaml   # Custom config file
+python quick_branch_test.py experiment.num_questions=50  # CLI overrides
+
+# Download all benchmarks to ./data
+python data.py
+
+# Download to a specific directory
+python data.py --data-dir ~/data/benchmarks
+
+# Download only specific benchmarks
+python data.py --benchmarks gsm8k mmlu
+
+# Force redownload existing files
+python data.py --force
+
+# Show stats about downloaded data
+python data.py --stats
+
 from noisy_coconut import NoisyCoconut
 
 # Initialize with your model
