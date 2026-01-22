@@ -6,13 +6,16 @@ and majority voting functionality. Use this to verify the system works before
 running larger experiments.
 
 Usage:
-    python quick_branch_test.py
+    python quick_branch_test.py                    # Use default config.yaml
+    python quick_branch_test.py --config my.yaml   # Use custom config file
+    python quick_branch_test.py experiment.num_questions=50  # Override via CLI
 """
 
 import torch
 import json
 import sys
 from datetime import datetime
+from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from coconut import Coconut
 from datasets import load_dataset
@@ -22,44 +25,51 @@ from collections import Counter
 import random
 import os
 import signal
-import random
 
-# ============================================================================
-# QUICK TEST CONFIGURATION
-# ============================================================================
+from omegaconf import OmegaConf, DictConfig
+from tqdm import tqdm
 
-BENCHMARK = "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
-NUM_QUESTIONS = 1000
-NUM_BRANCHES = 5
-MAX_NEW_TOKENS = 2056
 
-NOISE_SCALES = [0.0, 0.2]
-NOISE_TYPE = "gaussian_scaled"
-NOISE_DIRECTION = None
+def load_config(config_path: str = "config.yaml") -> DictConfig:
+    """Load configuration from YAML file and merge with CLI overrides."""
+    # Load base config
+    if os.path.exists(config_path):
+        cfg = OmegaConf.load(config_path)
+    else:
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    # Merge with CLI arguments (allows overrides like: experiment.num_questions=50)
+    cli_cfg = OmegaConf.from_cli()
+    cfg = OmegaConf.merge(cfg, cli_cfg)
+    
+    return cfg
 
-RANDOM_SEED = 42
 
-# Sampling parameters
-TEMPERATURE = 0.7
-TOP_P = 0.9
+def get_results_dir(cfg: DictConfig) -> Path:
+    """Get the results directory, creating it if needed."""
+    results_dir = Path(cfg.output_dir).expanduser()
+    results_dir.mkdir(parents=True, exist_ok=True)
+    return results_dir
 
-CHECKPOINT_INTERVAL = 100  # Save every N questions
 
-CHECKPOINT_FILE = f"checkpoint_{BENCHMARK}_{MODEL_NAME.replace('/', '_')}.json"
+def get_checkpoint_file(cfg: DictConfig) -> Path:
+    """Generate checkpoint file path based on config."""
+    results_dir = get_results_dir(cfg)
+    model_name_safe = cfg.model.name.replace('/', '_')
+    return results_dir / f"checkpoint_{cfg.benchmark}_{model_name_safe}.json"
 
-# ============================================================================
 
-def load_checkpoint(checkpoint_file: str) -> Dict[str, Any]:
+def load_checkpoint(checkpoint_file: Path) -> Dict[str, Any]:
     """Load checkpoint if it exists."""
-    if os.path.exists(checkpoint_file):
+    if checkpoint_file.exists():
         with open(checkpoint_file, 'r') as f:
             checkpoint = json.load(f)
         print(f"✓ Loaded checkpoint: {len(checkpoint['results'])} questions completed")
         return checkpoint
     return None
 
-def save_checkpoint(checkpoint_file: str, results: List[Dict], completed_ids: set, config: Dict):
+
+def save_checkpoint(checkpoint_file: Path, results: List[Dict], completed_ids: set, config: Dict):
     """Save checkpoint to disk."""
     checkpoint = {
         "config": config,
@@ -67,13 +77,14 @@ def save_checkpoint(checkpoint_file: str, results: List[Dict], completed_ids: se
         "results": results,
         "last_saved": datetime.now().isoformat()
     }
-    temp_file = checkpoint_file + ".tmp"
+    temp_file = checkpoint_file.with_suffix('.json.tmp')
     with open(temp_file, 'w') as f:
         json.dump(checkpoint, f, indent=2)
     os.replace(temp_file, checkpoint_file)
     print(f"✓ Checkpoint saved: {len(results)} questions completed")
 
-def setup_model(model_name: str = MODEL_NAME):
+
+def setup_model(model_name: str):
     """Initialize model and add special tokens."""
     print(f"Loading {model_name}...")
 
@@ -125,6 +136,7 @@ def setup_model(model_name: str = MODEL_NAME):
 
     return tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id
 
+
 def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, random_seed: int = None) -> List[Dict[str, str]]:
     """
     Load benchmark dataset (GSM8K, GSM-Symbolic, or MMLU).
@@ -163,7 +175,7 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
     questions = []
     answer_mapping = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
 
-    for i in indices:
+    for i in tqdm(indices, desc="Loading questions", leave=False):
         item = dataset[i]
         
         if benchmark in ("gsm8k", "gsm-symbolic"):
@@ -340,13 +352,13 @@ def test_question_with_branching(
     noise_type: str,
     noise_direction: str,
     benchmark: str = "gsm8k",
-    model_name=MODEL_NAME 
+    model_name: str = ""
 ) -> Dict[str, Any]:
     """Test a single question using branching generation with majority voting."""
     coconut_model.eval()
 
     input_ids = create_coconut_input(tokenizer, question, start_latent_id, end_latent_id, 
-                                  model_name=MODEL_NAME, benchmark=BENCHMARK)
+                                     model_name=model_name, benchmark=benchmark)
     original_input_ids = input_ids.clone()
     input_ids = input_ids.to(device)
 
@@ -405,38 +417,31 @@ def test_question_with_branching(
             }
 
 
-def run_quick_test():
+def run_quick_test(cfg: DictConfig):
     """Run a quick test of branching and majority voting."""
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    config = {
-        "benchmark": BENCHMARK,
-        "model": MODEL_NAME,
-        "num_questions": NUM_QUESTIONS,
-        "num_branches": NUM_BRANCHES,
-        "noise_scales": NOISE_SCALES,
-        "noise_type": NOISE_TYPE,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "random_seed": RANDOM_SEED
-    }
+    # Convert config to dict for serialization
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
 
     print("\n" + "="*70)
     print("QUICK BRANCHING + MAJORITY VOTING TEST")
     print("="*70)
-    print(f"Model: {MODEL_NAME}")
-    print(f"Benchmark: {BENCHMARK}")
-    print(f"Questions: {NUM_QUESTIONS}")
-    print(f"Branches: {NUM_BRANCHES}")
-    print(f"Noise scales: {NOISE_SCALES}")
-    print(f"Noise type: {NOISE_TYPE}")
-    print(f"Temperature: {TEMPERATURE}, Top-p: {TOP_P}")
+    print(f"Model: {cfg.model.name}")
+    print(f"Benchmark: {cfg.benchmark}")
+    print(f"Questions: {cfg.experiment.num_questions}")
+    print(f"Branches: {cfg.experiment.num_branches}")
+    print(f"Noise scales: {cfg.noise.scales}")
+    print(f"Noise type: {cfg.noise.type}")
+    print(f"Temperature: {cfg.sampling.temperature}, Top-p: {cfg.sampling.top_p}")
+    print(f"Output directory: {get_results_dir(cfg)}")
     print(f"Device: {device}")
     print("="*70)
 
     # Check for existing checkpoint
-    checkpoint = load_checkpoint(CHECKPOINT_FILE)
+    checkpoint_file = get_checkpoint_file(cfg)
+    checkpoint = load_checkpoint(checkpoint_file)
     if checkpoint:
         results = checkpoint["results"]
         completed_ids = set(checkpoint["completed_question_ids"])
@@ -446,9 +451,9 @@ def run_quick_test():
         completed_ids = set()
 
     # Setup
-    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(MODEL_NAME)
+    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(cfg.model.name)
 
-    if "gpt-oss" in MODEL_NAME:
+    if "gpt-oss" in cfg.model.name:
         hidden_layer_idx = 1
     else:
         hidden_layer_idx = -1
@@ -462,33 +467,36 @@ def run_quick_test():
         hidden_layer_idx=hidden_layer_idx
     )
 
-    questions = load_benchmark_dataset(BENCHMARK, NUM_QUESTIONS, random_seed=RANDOM_SEED)
-
-    print(f"Loaded {len(questions)} questions")
-    print(f"Completed IDs from checkpoint: {len(completed_ids)}")
-    questions_to_process = [q for q in questions if q["question_id"] not in completed_ids]
-    print(f"Questions to process: {len(questions_to_process)}")
-    print(f"First few completed IDs: {list(completed_ids)[:5]}")
-    print(f"First few question IDs to process: {[q['question_id'] for q in questions_to_process[:5]]}")
+    questions = load_benchmark_dataset(
+        cfg.benchmark, 
+        cfg.experiment.num_questions, 
+        random_seed=cfg.experiment.random_seed
+    )
 
     questions_to_process = [q for q in questions if q["question_id"] not in completed_ids]
     print(f"Questions remaining: {len(questions_to_process)}/{len(questions)}")
 
     def sigterm_handler(signum, frame):
         print("\n⚠ Received SIGTERM, saving checkpoint...")
-        save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
+        save_checkpoint(checkpoint_file, results, completed_ids, config_dict)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, sigterm_handler)
 
+    # Main progress bar
+    pbar = tqdm(
+        questions_to_process, 
+        desc="Processing questions",
+        initial=len(completed_ids),
+        total=len(questions)
+    )
+
     try:
-        for q_idx, q_data in enumerate(questions_to_process):
-            global_idx = len(completed_ids) + q_idx + 1
-            print(f"\n{'='*70}")
-            print(f"Question {global_idx}/{len(questions)} (ID: {q_data['question_id']})")
-            print(f"{'='*70}")
-            print(f"Q: {q_data['question'][:200]}...")
-            print(f"\nExpected Answer: {extract_answer(q_data['answer'], BENCHMARK)}")
+        for q_data in pbar:
+            pbar.set_postfix({
+                "id": q_data["question_id"],
+                "completed": len(completed_ids)
+            })
 
             question_results = {
                 "question_id": q_data["question_id"],
@@ -497,10 +505,17 @@ def run_quick_test():
                 "noise_tests": []
             }
 
-            for noise_scale in NOISE_SCALES:
-                print(f"\n{'-'*70}")
-                print(f"Testing noise={noise_scale} with {NUM_BRANCHES} branches...")
-                print(f"{'-'*70}")
+            expected_answer = extract_answer(q_data["answer"], cfg.benchmark)
+
+            # Noise scale progress bar
+            noise_pbar = tqdm(
+                cfg.noise.scales, 
+                desc=f"  Noise scales", 
+                leave=False
+            )
+
+            for noise_scale in noise_pbar:
+                noise_pbar.set_postfix({"noise": noise_scale})
 
                 result = test_question_with_branching(
                     coconut_model=coconut_model,
@@ -509,30 +524,19 @@ def run_quick_test():
                     noise_scale=noise_scale,
                     start_latent_id=start_latent_id,
                     end_latent_id=end_latent_id,
-                    num_branches=NUM_BRANCHES,
-                    temperature=TEMPERATURE,
-                    top_p=TOP_P,
-                    max_new_tokens=MAX_NEW_TOKENS,
+                    num_branches=cfg.experiment.num_branches,
+                    temperature=cfg.sampling.temperature,
+                    top_p=cfg.sampling.top_p,
+                    max_new_tokens=cfg.model.max_new_tokens,
                     device=device,
-                    noise_type=NOISE_TYPE,
-                    noise_direction=NOISE_DIRECTION,
-                    benchmark=BENCHMARK
+                    noise_type=cfg.noise.type,
+                    noise_direction=cfg.noise.direction,
+                    benchmark=cfg.benchmark,
+                    model_name=cfg.model.name
                 )
 
                 if result["success"]:
-                    expected_answer = extract_answer(q_data["answer"], BENCHMARK)
                     is_correct = result["majority_answer"] == expected_answer
-
-                    print(f"\n✓ Generation successful!")
-                    print(f"\nBranch answers: {result['branch_answers']}")
-                    print(f"Vote distribution: {result['vote_distribution']}")
-                    print(f"\nMajority vote: {result['majority_answer']}")
-                    print(f"Expected: {expected_answer}")
-                    print(f"Result: {'✓ CORRECT' if is_correct else '✗ INCORRECT'}")
-
-                    if result['branch_texts']:
-                        print(f"\nExample output (Branch 1):")
-                        print(f"  {result['branch_texts'][0][:200]}...")
 
                     question_results["noise_tests"].append({
                         "noise_scale": noise_scale,
@@ -545,7 +549,6 @@ def run_quick_test():
                         "num_branches": result["num_branches"]
                     })
                 else:
-                    print(f"\n✗ Error: {result['error']}")
                     question_results["noise_tests"].append({
                         "noise_scale": noise_scale,
                         "error": result["error"]
@@ -555,42 +558,59 @@ def run_quick_test():
             completed_ids.add(q_data["question_id"])
 
             # Checkpoint every N questions
-            if len(completed_ids) % CHECKPOINT_INTERVAL == 0:
-                save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
+            if len(completed_ids) % cfg.checkpoint.interval == 0:
+                save_checkpoint(checkpoint_file, results, completed_ids, config_dict)
 
     except KeyboardInterrupt:
         print("\n⚠ Interrupted, saving checkpoint...")
-        save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
+        save_checkpoint(checkpoint_file, results, completed_ids, config_dict)
         sys.exit(0)
 
     # Final checkpoint
-    save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
+    save_checkpoint(checkpoint_file, results, completed_ids, config_dict)
 
     # Summary
     print("\n" + "="*70)
     print("TEST SUMMARY")
     print("="*70)
 
-    for q_idx, q_result in enumerate(results):
-        print(f"\nQuestion {q_idx + 1}: {q_result['question'][:60]}...")
-        print(f"Expected: {extract_answer(q_result['expected_answer'], BENCHMARK)}")
+    total_correct = {scale: 0 for scale in cfg.noise.scales}
+    total_count = {scale: 0 for scale in cfg.noise.scales}
 
+    for q_result in results:
         for test in q_result["noise_tests"]:
-            noise = test.get("noise_scale", "?")
-            if "majority_answer" in test:
-                majority = test["majority_answer"]
-                correct = "✓" if test.get("is_correct") else "✗"
-                print(f"  Noise={noise}: {correct} Majority={majority}, Votes={test['vote_distribution']}")
-            else:
-                print(f"  Noise={noise}: ✗ Error")
+            noise = test.get("noise_scale")
+            if noise is not None and "is_correct" in test:
+                total_count[noise] += 1
+                if test["is_correct"]:
+                    total_correct[noise] += 1
+
+    print("\nAccuracy by noise scale:")
+    for noise_scale in cfg.noise.scales:
+        if total_count[noise_scale] > 0:
+            acc = total_correct[noise_scale] / total_count[noise_scale] * 100
+            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({acc:.2f}%)")
 
     # Save final results
-    model_name_safe = MODEL_NAME.replace('/', '_')
-    output_file = f"noisy_coconut_{BENCHMARK}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    results_dir = get_results_dir(cfg)
+    model_name_safe = cfg.model.name.replace('/', '_')
+    output_file = results_dir / f"noisy_coconut_{cfg.benchmark}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    
     with open(output_file, 'w') as f:
         json.dump({
-            "config": config,
-            "results": results
+            "config": config_dict,
+            "results": results,
+            "summary": {
+                "total_questions": len(results),
+                "accuracy_by_noise": {
+                    str(scale): {
+                        "correct": total_correct[scale],
+                        "total": total_count[scale],
+                        "accuracy": total_correct[scale] / total_count[scale] if total_count[scale] > 0 else 0
+                    }
+                    for scale in cfg.noise.scales
+                }
+            }
         }, f, indent=2)
 
     print(f"\n✓ Results saved to: {output_file}")
@@ -600,9 +620,21 @@ def run_quick_test():
 
 
 if __name__ == "__main__":
-    # Allow overriding NUM_QUESTIONS from command line
-    if len(sys.argv) > 1:
-        NUM_QUESTIONS = int(sys.argv[1])
-        print(f"Overriding NUM_QUESTIONS to {NUM_QUESTIONS} from command line")
-
-    run_quick_test()
+    # Parse --config argument if provided, otherwise use default
+    config_path = "config.yaml"
+    
+    # Check for --config argument
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--config" and i + 2 < len(sys.argv):
+            config_path = sys.argv[i + 2]
+            # Remove --config and its value from sys.argv so OmegaConf doesn't see them
+            sys.argv.pop(i + 1)
+            sys.argv.pop(i + 1)
+            break
+        elif arg.startswith("--config="):
+            config_path = arg.split("=", 1)[1]
+            sys.argv.pop(i + 1)
+            break
+    
+    cfg = load_config(config_path)
+    run_quick_test(cfg)
