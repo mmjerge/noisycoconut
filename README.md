@@ -1,185 +1,332 @@
-# Coconut
+# NoisyCoconut
 
-The code base is the official implementation of [Training Large Language Models to Reason in a Continuous Latent Space](https://arxiv.org/abs/2412.06769).
+![NoisyCoconut Logo](./assets/noisy_coconut_diagram.png)
 
-![coconut](assets/coconut.png)
+A memory-optimized implementation of the COCONUT approach for generating divergent reasoning paths in large language models with DeepSpeed acceleration.
 
-## Getting Started
-Clone repo:
+## Overview
+
+Noisy Coconut is a Python package for testing and evaluating the COCONUT (COntinuous latent mental COmputation with Noisy UpdateTs) approach with large language models. It implements true latent thinking entirely in hidden state space, without tokenizing during the thinking process.
+
+The package is optimized for efficient inference with:
+1. DeepSpeed for multi-GPU inference
+2. Flash Attention for faster attention computation
+3. Batch processing for parallel evaluation
+
+## Features
+
+- **True Latent Thinking**: Implements COCONUT with thinking entirely in hidden state space
+- **DeepSpeed Optimization**: Multi-GPU inference with tensor parallelism
+- **Flexible Benchmarking**: Ready-to-use benchmarks for GSM8k, GSM-Symbolic, and MMLU
+- **Advanced Voting Systems**: Multiple voting schemes for aggregating results
+- **Comprehensive Evaluation**: Detailed results and statistics
+- **Configuration System**: OmegaConf-based configuration with YAML support
+
+## Installation
+
+### Prerequisites
+
+- Python 3.8+
+- PyTorch 1.10+
+- CUDA-compatible GPU(s)
+
+### Install from Source
+
+```bash
+git clone https://github.com/yourusername/NoisyCoconut.git
+cd NoisyCoconut
+pip install -e .
 ```
-git clone git@github.com:facebookresearch/coconut.git
-cd coconut
+
+### Install with DeepSpeed
+
+```bash
+pip install "noisy_coconut[deepspeed]"
 ```
 
-Setup environment:
-```
-conda create --name coconut python=3.12
-conda activate coconut
-pip install -r requirements.txt
-```
+## Quick Start
 
-The code relies on [wandb](https://wandb.ai/site/) for logging. Please log in your wandb account following this [document](https://docs.wandb.ai/ref/cli/wandb-login/) before running any experiments.
-
-## Data
-
-The data for training and evaluation should be presented as a json file like below:
+### Basic Usage
 
 ```python
-[
-  {
-    "question": "...",
-    "answer": "...",
-    "steps": ["...", "...", ...]
-  },
-  ...
-]
+from noisy_coconut import DeepSpeedLatentPathEvaluator
+
+# Initialize the evaluator
+evaluator = DeepSpeedLatentPathEvaluator(
+    model_name_or_path="Qwen/Qwen2-7B-Instruct",
+    local_rank=0,
+    world_size=1,
+    max_new_tokens=1024,
+    noise_scale=0.1,
+    max_latent_steps=4,
+    voting_scheme="simple"
+)
+
+# Generate divergent reasoning paths for a math problem
+problem = "John has 5 pens and Mary has 3 times as many pens as John. How many pens do they have in total?"
+paths = evaluator.generate_divergent_paths(problem, num_paths=3, benchmark_type="gsm8k")
+
+# Print the results
+for i, path_data in enumerate(paths):
+    print(f"Path {i+1}:")
+    print(f"Text: {path_data['text'][:200]}...")
+    print(f"Metadata: {path_data['metadata']}")
+    print()
 ```
 
-The file should contain a list of data points. Each data point is composed of a question (str), an answer (str), and a list of steps (str), where each of them is a string.
+## Configuration System
 
-For example, you can download and process the [GSM8K](https://arxiv.org/abs/2110.14168) dataset (with [augmented training and validation sets](https://github.com/da03/Internalize_CoT_Step_by_Step/tree/e06a32ee5e4cd117171daeb4755d2a97ece62761/data/gsm8k)) by running:
+NoisyCoconut uses OmegaConf for flexible configuration management through YAML files and command-line overrides.
+
+### Default Configuration
+
+The package comes with a default configuration file that sets common parameters:
+
+```yaml
+# Model settings
+model:
+  name: "Qwen/Qwen2-7B-Instruct"
+  dtype: "fp16" 
+  use_flash_attention: true
+
+# DeepSpeed settings
+deepspeed:
+  world_size: 4
+  local_rank: -1
+  enable_cuda_graph: true
+
+# Generation settings
+generation:
+  max_new_tokens: 2000
+  batch_size: 8
+
+# COCONUT settings
+coconut:
+  noise_scale: 0.1
+  max_latent_steps: 8
+  latent_noise_steps: "1,2,3,4"
+  voting_scheme: "simple"
+
+# Benchmark settings
+benchmark:
+  type: "gsm-symbolic"
+  num_samples: 1000
+  num_paths: 5
+  seed: 42
+
+# Output settings
+output:
+  file: "noisy_coconut_results.json"
+  checkpoint_dir: "checkpoints"
+  verbose: false
+```
+
+### Using Custom Configurations
+
+You can create your own configuration files:
+
+```yaml
+# my_experiment.yaml
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  dtype: "bf16"
+
+benchmark:
+  type: "gsm8k"
+  num_samples: 100
+```
+
+And use them via the command line:
 
 ```bash
-bash preprocessing/gsm_icot.bash
+noisy-coconut --config my_experiment.yaml
 ```
 
-## Arguments
+### Command-Line Usage
 
-The configuration of a run should be specified in a yaml file (an example can be found [here](args/gsm_coconut.yaml)).
-
-- **General settings**
-
-  - **project**: Project name for wandb
-  - **save_path**: Your path to store the checkpoints
-  - **only_eval**: If true, only load a model and test on the data from `val_path` (must used along with `load_model_path`). Otherwise, train the model on `train_path` and test on `val_path` after every epoch.
-
-- **Method**
-  - **coconut**: Train coconut model
-  - **cot**: Train cot model
-  - **no_thoughts**: Train coconut (w/o thought) model
-  - **no_cot**: Train no-cot model
-
-- **Training settings**
-
-  - **c_thought**: Number of continuous thoughts for each reasoning step
-  - **epochs_per_stage**: Number of epochs for every training stage
-  - **max_latent_stage**: The maximum number of training stages (in addition to the initial stage)
-  - **pad_latent_to_max**: If the number of reasoning steps is fewer than the index of current training stage, pad the number of continuous thoughts.
-  - **save_only_improve**: Save the model only when there the best validation accuracy is updated. Recommended to set `False` for Coconut model training, because otherwise the checkpoints in the last stage might now get saved.
-  - **uniform_prob**: The probability to mix data from other stages. 0 for standard experiment, 0.3 for analysis experiment.
-  - **model_id**: Huggingface model id to load as the initialization, e.g., `openai-community/gpt2`
-  - **load_model_path**: The path to a checkpoint to load. Used in two cases: (1) for evaluation (2) to initialize coconut from a CoT-tuned model.
-  - **seed**: Random seed.
-  - **resume**: The epoch to resume. Can be used when we want to skip the initial training stages.
-  - **bf16**: Whether to use bf16 training.
-  - **train_path**: Path to the training set.
-  - **val_path**: Path to the validation or test set (depending on `only_eval`)
-  - **reset_optimizer**: Whether to reset the optimizer when swtiching training stages.
-  - **batch_size_training**: Batch size to train the model per GPU.
-  - **debug**: If true, there is no wandb and model saving. A subset of data will be used.
-  - **gradient_accumulation_steps**: Gradient accumulation steps
-  - **num_epochs**: Maximum training epoches.
-  - **lr**: Learning rate
-  - **weight_decay**: Weight decay
-
-
-## Training
-
-Run the following commands (replacing `N_GPUS` and `PATH_TO_ARGS`):
-
-```
-torchrun --nnodes 1 --nproc_per_node N_GPUS run.py PATH_TO_ARGS
-```
-
-## Reproducing Experiments
-
-Here we provide instructions to reproduce our experiments in the paper.
-
-All the commands below assume 4 * A100 (80GB) GPUs. You may change the corresponding arguments in the config file (`batch_size_training`, `gradient_accumulation_steps`) and `nproc_per_node` when launching the run, to adapt your resources.
-
-
-### GSM8K
-
-Preprocessing data:
+#### Using Default Settings
 
 ```bash
-bash preprocessing/gsm_icot.bash
+# Use with all default settings
+noisy-coconut
+
+# Run with DeepSpeed
+deepspeed --num_gpus=4 -m noisy_coconut.cli.main
 ```
 
-First train the model with CoT (as the stage 0 training)
+#### Overriding Specific Settings
 
 ```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/gsm_cot.yaml
+# Override specific parameters with new dot notation
+noisy-coconut --model.name "meta-llama/Llama-3.1-8B-Instruct" --benchmark.type gsm8k
 ```
 
-Select a checkpoint as the initialization of Coconut (the validation accuracy is expected to be around 40%). Replace the `load_model_path` in the [args/gsm_coconut.yaml](args/gsm_coconut.yaml) with your selected checkpoint, and run:
+#### Using Multiple GPUs
 
 ```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/gsm_coconut.yaml
+# Run with multiple GPUs
+deepspeed --num_gpus=4 -m noisy_coconut.cli.main --model.name "meta-llama/Llama-3.1-70B-Instruct" --deepspeed.world_size 4
 ```
 
-Find the checkpoint with best validation accuracy, and put the path as `load_model_path` in [args/gsm_coconut_eval.yaml](args/gsm_coconut_eval.yaml). To evaluate:
+#### Legacy Command Format (Backward Compatible)
+
+The package still supports the old-style command format:
 
 ```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/gsm_coconut_eval.yaml
+deepspeed --num_gpus=4 -m noisy_coconut.cli.main \
+  --model_name "Qwen/Qwen2-7B-Instruct" \
+  --world_size 4 \
+  --num_paths 5 \
+  --num_samples 1000 \
+  --max_tokens 2000 \
+  --noise_scale 0.1 \
+  --use_flash_attention \
+  --latent_noise_steps '1,2,3,4' \
+  --max_latent_steps 8 \
+  --batch_size 8 \
+  --benchmark gsm-symbolic \
+  --enable_cuda_graph \
+  --checkpoint_dir "checkpoints"
 ```
 
-### ProntoQA
+## Advanced Usage
 
-Please clone the official [github repo](https://github.com/asaparov/prontoqa/tree/f0145b867b3c106285ec9ea1941a3f6eb7c6162d) of [ProntoQA](https://arxiv.org/pdf/2210.01240) and generate a raw dataset with:
+### Using the Configuration System in Code
+
+```python
+import os
+from noisy_coconut import DeepSpeedLatentPathEvaluator
+from noisy_coconut.utils import get_config, config_to_evaluator_args
+
+# Load configuration - automatically handles file loading and CLI overrides
+config = get_config()
+
+# Convert config to evaluator arguments
+evaluator_args = config_to_evaluator_args(config)
+
+# Create evaluator with configuration
+evaluator = DeepSpeedLatentPathEvaluator(**evaluator_args)
+
+# Use the evaluator
+problem = "What is 2+2?"
+paths = evaluator.generate_divergent_paths(problem, 
+                                          num_paths=config.benchmark.num_paths, 
+                                          benchmark_type=config.benchmark.type)
+```
+
+### Multi-GPU Inference with DeepSpeed
+
+```python
+import os
+import torch
+import deepspeed
+from noisy_coconut import DeepSpeedLatentPathEvaluator
+from noisy_coconut.utils import get_config, config_to_evaluator_args
+
+# Load configuration
+config = get_config()
+
+# Adjust for multi-GPU setup
+local_rank = int(os.environ.get("LOCAL_RANK", 0))
+world_size = int(os.environ.get("WORLD_SIZE", 1))
+config.deepspeed.local_rank = local_rank
+config.deepspeed.world_size = world_size
+
+# Get evaluator arguments from config
+evaluator_args = config_to_evaluator_args(config)
+
+# Create evaluator
+evaluator = DeepSpeedLatentPathEvaluator(**evaluator_args)
+
+# Load benchmark data
+from noisy_coconut.utils import load_gsm8k_samples
+questions, references = load_gsm8k_samples(n_samples=10, seed=42)
+
+# Run benchmark evaluation
+results = evaluator.evaluate_benchmark(
+    questions, references, num_paths=5, benchmark_type="gsm8k"
+)
+```
+
+### Comparing Different Voting Schemes
+
+```python
+from noisy_coconut.utils import compare_voting_schemes, get_config, config_to_evaluator_args
+
+# Get base config
+config = get_config()
+
+# Run evaluations with different voting schemes
+all_results = {}
+for scheme in ["simple", "weighted", "accuracy", "advanced"]:
+    # Update voting scheme in config
+    config.coconut.voting_scheme = scheme
+    
+    # Get evaluator args and create evaluator
+    evaluator_args = config_to_evaluator_args(config)
+    evaluator = DeepSpeedLatentPathEvaluator(**evaluator_args)
+    
+    # Run benchmark with this scheme
+    results = run_benchmarks(evaluator, config.benchmark.type, 
+                            config.benchmark.num_samples, 
+                            config.benchmark.num_paths, 
+                            config.benchmark.seed)
+    all_results[scheme] = results
+
+# Compare results across voting schemes
+comparison = compare_voting_schemes(all_results, ["simple", "weighted", "accuracy", "advanced"])
+print(f"Best voting scheme: {comparison['overall']['best_scheme']}")
+```
+
+## Benchmarks
+
+NoisyCoconut supports the following benchmarks:
+
+- **GSM8K**: Grade school math problems
+- **GSM-Symbolic**: Symbolic math problems
+- **MMLU**: Massive Multitask Language Understanding
+
+To run a specific benchmark:
 
 ```bash
-cd prontoqa
-python run_experiment.py --model-name json --model-size dummy --ordering random --num-trials 10000 --few-shot-examples 0 --ontology fictional --min-hops 5 --max-hops 5 --hops-skip 1
+noisy-coconut --benchmark.type gsm8k --benchmark.num_samples 20
 ```
 
-Then copy the generated `5hop_0shot_random.json` file to `data` directory, and preprocess the dataset with:
+## Technical Details
 
-```bash
-python preprocessing/prontoqa.py
-```
+### COCONUT Approach
 
+The COCONUT approach, as described in "Training Large Language Models to Reason in a Continuous Latent Space" (Hao et al., 2024), involves:
 
-Then run the following to train the model:
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prontoqa_coconut.yaml
-```
+1. Operating entirely in hidden state space without tokenizing during thinking
+2. Applying noise to promote exploration of diverse reasoning paths
+3. Iterative updates to the hidden state until convergence
+4. Seamless transition from latent thinking to token generation
 
-Find the checkpoint with best validation accuracy, and put the path as `load_model_path` in [args/prosqa_coconut_eval.yaml](args/prosqa_coconut_eval.yaml). To evaluate:
+This implementation enhances the original approach with optimizations for memory efficiency and multi-GPU inference.
 
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prosqa_coconut_eval.yaml
-```
+### Voting Schemes
 
+NoisyCoconut supports multiple voting schemes for aggregating results:
 
-### ProsQA
-
-The ProsQA dataset is at [data/prosqa_*.json](data).
-
-Then run the following to train the model:
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prosqa_coconut.yaml
-```
-
-Find the checkpoint with best validation accuracy, and put the path as `load_model_path` in [args/prosqa_coconut_eval.yaml](args/prosqa_coconut_eval.yaml). To evaluate:
-
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prosqa_coconut_eval.yaml
-```
-
-
-
+- **Simple**: Basic majority voting
+- **Weighted**: Weights votes by inverse of noise scale
+- **Accuracy**: Weights votes by historical accuracy of each path
+- **Advanced**: Tries multiple strategies and picks the best one
 
 ## Citation
-If you use this code base in your research, please cite our paper with the following BibTex entry:
+
+If you use NoisyCoconut in your research, please cite:
+
 ```bibtex
-@article{hao2024training,
-  title={Training Large Language Models to Reason in a Continuous Latent Space},
-  author={Hao, Shibo and Sukhbaatar, Sainbayar and Su, DiJia and Li, Xian and Hu, Zhiting and Weston, Jason and Tian, Yuandong},
-  journal={arXiv preprint arXiv:2412.06769},
-  year={2024}
+@software{noisycoconut2025,
+  author = {Michael Jerge},
+  title = {NoisyCoconut: A Memory-Optimized Implementation of COCONUT for Large Language Models},
+  year = {2025},
+  url = {https://github.com/yourusername/NoisyCoconut}
 }
 ```
 
 ## License
-This code is released under the MIT license (see [LICENSE](LICENSE)).
+
+MIT
