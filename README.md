@@ -1,332 +1,188 @@
 # NoisyCoconut
 
+**Counterfactual Consensus via Latent Space Reasoning**
+
 ![NoisyCoconut Logo](./assets/noisy_coconut_diagram.png)
 
-A memory-optimized implementation of the COCONUT approach for generating divergent reasoning paths in large language models with DeepSpeed acceleration.
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-## Overview
+NoisyCoconut is a training-free inference-time method that enhances large language model (LLM) reliability by injecting controlled noise into latent representations to generate diverse reasoning paths. Agreement among these paths provides a confidence signal, enabling models to abstain when uncertain and achieve effective coverage-accuracy tradeoffs.
 
-Noisy Coconut is a Python package for testing and evaluating the COCONUT (COntinuous latent mental COmputation with Noisy UpdateTs) approach with large language models. It implements true latent thinking entirely in hidden state space, without tokenizing during the thinking process.
+## Key Features
 
-The package is optimized for efficient inference with:
-1. DeepSpeed for multi-GPU inference
-2. Flash Attention for faster attention computation
-3. Batch processing for parallel evaluation
+- **No Retraining Required**: Operates directly on model representations during inference
+- **Coverage-Accuracy Tradeoffs**: Enables selective prediction through agreement-based confidence estimation
+- **Significant Error Reduction**: Unanimous agreement among noise-perturbed paths reduces error rates from 40–70% to below 15%
+- **Model Agnostic**: Works across multiple LLM architectures (Qwen, Llama, Mixtral, DeepSeek, GPT-oss)
 
-## Features
+## How It Works
 
-- **True Latent Thinking**: Implements COCONUT with thinking entirely in hidden state space
-- **DeepSpeed Optimization**: Multi-GPU inference with tensor parallelism
-- **Flexible Benchmarking**: Ready-to-use benchmarks for GSM8k, GSM-Symbolic, and MMLU
-- **Advanced Voting Systems**: Multiple voting schemes for aggregating results
-- **Comprehensive Evaluation**: Detailed results and statistics
-- **Configuration System**: OmegaConf-based configuration with YAML support
+1. **Noise Injection**: Sample random noise from a Gaussian distribution and inject it into the last hidden layer of the first forward pass
+2. **Path Generation**: Create K diverse reasoning paths from a common initial state
+3. **Output Aggregation**: Use majority voting to produce a consensus output or abstain when paths disagree
+
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8+
-- PyTorch 1.10+
-- CUDA-compatible GPU(s)
-
-### Install from Source
-
 ```bash
-git clone https://github.com/yourusername/NoisyCoconut.git
-cd NoisyCoconut
-pip install -e .
-```
+git clone https://github.com/your-username/noisycoconut.git
+cd noisycoconut
+pip install -r requirements.txt
 
-### Install with DeepSpeed
+Requirements
 
-```bash
-pip install "noisy_coconut[deepspeed]"
-```
+    Python >= 3.8
+    PyTorch >= 2.0
+    Transformers >= 4.35
 
-## Quick Start
+Quick Start
 
-### Basic Usage
+from noisy_coconut import NoisyCoconut
 
-```python
-from noisy_coconut import DeepSpeedLatentPathEvaluator
-
-# Initialize the evaluator
-evaluator = DeepSpeedLatentPathEvaluator(
-    model_name_or_path="Qwen/Qwen2-7B-Instruct",
-    local_rank=0,
-    world_size=1,
-    max_new_tokens=1024,
-    noise_scale=0.1,
-    max_latent_steps=4,
-    voting_scheme="simple"
+# Initialize with your model
+model = NoisyCoconut(
+    model_name="Qwen/Qwen2.5-7B-Instruct",
+    num_paths=5,           # K reasoning paths
+    noise_scale=0.2,       # σ_0
+    max_latent_steps=8     # Maximum thinking steps
 )
 
-# Generate divergent reasoning paths for a math problem
-problem = "John has 5 pens and Mary has 3 times as many pens as John. How many pens do they have in total?"
-paths = evaluator.generate_divergent_paths(problem, num_paths=3, benchmark_type="gsm8k")
-
-# Print the results
-for i, path_data in enumerate(paths):
-    print(f"Path {i+1}:")
-    print(f"Text: {path_data['text'][:200]}...")
-    print(f"Metadata: {path_data['metadata']}")
-    print()
-```
-
-## Configuration System
-
-NoisyCoconut uses OmegaConf for flexible configuration management through YAML files and command-line overrides.
-
-### Default Configuration
-
-The package comes with a default configuration file that sets common parameters:
-
-```yaml
-# Model settings
-model:
-  name: "Qwen/Qwen2-7B-Instruct"
-  dtype: "fp16" 
-  use_flash_attention: true
-
-# DeepSpeed settings
-deepspeed:
-  world_size: 4
-  local_rank: -1
-  enable_cuda_graph: true
-
-# Generation settings
-generation:
-  max_new_tokens: 2000
-  batch_size: 8
-
-# COCONUT settings
-coconut:
-  noise_scale: 0.1
-  max_latent_steps: 8
-  latent_noise_steps: "1,2,3,4"
-  voting_scheme: "simple"
-
-# Benchmark settings
-benchmark:
-  type: "gsm-symbolic"
-  num_samples: 1000
-  num_paths: 5
-  seed: 42
-
-# Output settings
-output:
-  file: "noisy_coconut_results.json"
-  checkpoint_dir: "checkpoints"
-  verbose: false
-```
-
-### Using Custom Configurations
-
-You can create your own configuration files:
-
-```yaml
-# my_experiment.yaml
-model:
-  name: "meta-llama/Llama-3.1-8B-Instruct"
-  dtype: "bf16"
-
-benchmark:
-  type: "gsm8k"
-  num_samples: 100
-```
-
-And use them via the command line:
-
-```bash
-noisy-coconut --config my_experiment.yaml
-```
-
-### Command-Line Usage
-
-#### Using Default Settings
-
-```bash
-# Use with all default settings
-noisy-coconut
-
-# Run with DeepSpeed
-deepspeed --num_gpus=4 -m noisy_coconut.cli.main
-```
-
-#### Overriding Specific Settings
-
-```bash
-# Override specific parameters with new dot notation
-noisy-coconut --model.name "meta-llama/Llama-3.1-8B-Instruct" --benchmark.type gsm8k
-```
-
-#### Using Multiple GPUs
-
-```bash
-# Run with multiple GPUs
-deepspeed --num_gpus=4 -m noisy_coconut.cli.main --model.name "meta-llama/Llama-3.1-70B-Instruct" --deepspeed.world_size 4
-```
-
-#### Legacy Command Format (Backward Compatible)
-
-The package still supports the old-style command format:
-
-```bash
-deepspeed --num_gpus=4 -m noisy_coconut.cli.main \
-  --model_name "Qwen/Qwen2-7B-Instruct" \
-  --world_size 4 \
-  --num_paths 5 \
-  --num_samples 1000 \
-  --max_tokens 2000 \
-  --noise_scale 0.1 \
-  --use_flash_attention \
-  --latent_noise_steps '1,2,3,4' \
-  --max_latent_steps 8 \
-  --batch_size 8 \
-  --benchmark gsm-symbolic \
-  --enable_cuda_graph \
-  --checkpoint_dir "checkpoints"
-```
-
-## Advanced Usage
-
-### Using the Configuration System in Code
-
-```python
-import os
-from noisy_coconut import DeepSpeedLatentPathEvaluator
-from noisy_coconut.utils import get_config, config_to_evaluator_args
-
-# Load configuration - automatically handles file loading and CLI overrides
-config = get_config()
-
-# Convert config to evaluator arguments
-evaluator_args = config_to_evaluator_args(config)
-
-# Create evaluator with configuration
-evaluator = DeepSpeedLatentPathEvaluator(**evaluator_args)
-
-# Use the evaluator
-problem = "What is 2+2?"
-paths = evaluator.generate_divergent_paths(problem, 
-                                          num_paths=config.benchmark.num_paths, 
-                                          benchmark_type=config.benchmark.type)
-```
-
-### Multi-GPU Inference with DeepSpeed
-
-```python
-import os
-import torch
-import deepspeed
-from noisy_coconut import DeepSpeedLatentPathEvaluator
-from noisy_coconut.utils import get_config, config_to_evaluator_args
-
-# Load configuration
-config = get_config()
-
-# Adjust for multi-GPU setup
-local_rank = int(os.environ.get("LOCAL_RANK", 0))
-world_size = int(os.environ.get("WORLD_SIZE", 1))
-config.deepspeed.local_rank = local_rank
-config.deepspeed.world_size = world_size
-
-# Get evaluator arguments from config
-evaluator_args = config_to_evaluator_args(config)
-
-# Create evaluator
-evaluator = DeepSpeedLatentPathEvaluator(**evaluator_args)
-
-# Load benchmark data
-from noisy_coconut.utils import load_gsm8k_samples
-questions, references = load_gsm8k_samples(n_samples=10, seed=42)
-
-# Run benchmark evaluation
-results = evaluator.evaluate_benchmark(
-    questions, references, num_paths=5, benchmark_type="gsm8k"
+# Run inference with confidence estimation
+result = model.generate(
+    prompt="What is 15% of 80?",
+    confidence_threshold="4/5"  # Require 4/5 agreement
 )
-```
 
-### Comparing Different Voting Schemes
+print(f"Answer: {result.answer}")
+print(f"Confidence: {result.agreement_level}")
+print(f"Abstain: {result.abstain}")
 
-```python
-from noisy_coconut.utils import compare_voting_schemes, get_config, config_to_evaluator_args
+Configuration
+Key Hyperparameters
+Parameter	Default	Description
 
-# Get base config
-config = get_config()
+num_paths
 
-# Run evaluations with different voting schemes
-all_results = {}
-for scheme in ["simple", "weighted", "accuracy", "advanced"]:
-    # Update voting scheme in config
-    config.coconut.voting_scheme = scheme
-    
-    # Get evaluator args and create evaluator
-    evaluator_args = config_to_evaluator_args(config)
-    evaluator = DeepSpeedLatentPathEvaluator(**evaluator_args)
-    
-    # Run benchmark with this scheme
-    results = run_benchmarks(evaluator, config.benchmark.type, 
-                            config.benchmark.num_samples, 
-                            config.benchmark.num_paths, 
-                            config.benchmark.seed)
-    all_results[scheme] = results
+(K)	5	Number of reasoning paths to generate
 
-# Compare results across voting schemes
-comparison = compare_voting_schemes(all_results, ["simple", "weighted", "accuracy", "advanced"])
-print(f"Best voting scheme: {comparison['overall']['best_scheme']}")
-```
+noise_scale
 
-## Benchmarks
+(σ₀)	0.2	Initial noise scale (ratio of noise norm to hidden state norm)
 
-NoisyCoconut supports the following benchmarks:
+decay_rate
 
-- **GSM8K**: Grade school math problems
-- **GSM-Symbolic**: Symbolic math problems
-- **MMLU**: Massive Multitask Language Understanding
+(λ)	1.0	Exponential decay rate for noise
 
-To run a specific benchmark:
+max_latent_steps
 
-```bash
-noisy-coconut --benchmark.type gsm8k --benchmark.num_samples 20
-```
+	8	Maximum continuous latent thinking steps
 
-## Technical Details
+ema_alpha
 
-### COCONUT Approach
+(α)	0.9	EMA coefficient for adaptive noise scaling
+Confidence Thresholds
 
-The COCONUT approach, as described in "Training Large Language Models to Reason in a Continuous Latent Space" (Hao et al., 2024), involves:
+    Unanimous (5/5): Highest accuracy, lowest coverage
+    Strong Majority (4/5): High accuracy with moderate coverage
+    Moderate Majority (3/5): Balanced tradeoff
+    Minimal Plurality (2/5): Higher coverage, lower accuracy
 
-1. Operating entirely in hidden state space without tokenizing during thinking
-2. Applying noise to promote exploration of diverse reasoning paths
-3. Iterative updates to the hidden state until convergence
-4. Seamless transition from latent thinking to token generation
+We evaluate on three benchmarks:
 
-This implementation enhances the original approach with optimizations for memory efficiency and multi-GPU inference.
+    GSM8K: Grade-school math word problems
+    GSM-Symbolic: Symbolic variant of GSM8K
+    MMLU: Massive Multitask Language Understanding
 
-### Voting Schemes
+from noisy_coconut import NoisyCoconut
 
-NoisyCoconut supports multiple voting schemes for aggregating results:
+model = NoisyCoconut("Qwen/Qwen2.5-7B-Instruct")
 
-- **Simple**: Basic majority voting
-- **Weighted**: Weights votes by inverse of noise scale
-- **Accuracy**: Weights votes by historical accuracy of each path
-- **Advanced**: Tries multiple strategies and picks the best one
+# Single query
+result = model.generate("Solve: 2x + 5 = 15")
 
-## Citation
+Batch Evaluation
 
-If you use NoisyCoconut in your research, please cite:
+from noisy_coconut import NoisyCoconut, evaluate_benchmark
 
-```bibtex
-@software{noisycoconut2025,
-  author = {Michael Jerge},
-  title = {NoisyCoconut: A Memory-Optimized Implementation of COCONUT for Large Language Models},
-  year = {2025},
-  url = {https://github.com/yourusername/NoisyCoconut}
+model = NoisyCoconut("Qwen/Qwen2.5-7B-Instruct")
+
+# Evaluate on GSM8K
+results = evaluate_benchmark(
+    model=model,
+    benchmark="gsm8k",
+    num_samples=1000,
+    confidence_thresholds=["2/5", "3/5", "4/5", "5/5"]
+)
+
+# Print coverage-accuracy tradeoff
+for threshold, metrics in results.items():
+    print(f"{threshold}: Accuracy={metrics['accuracy']:.1%}, Coverage={metrics['coverage']:.1%}")
+
+Custom Noise Configuration
+
+model = NoisyCoconut(
+    model_name="Qwen/Qwen2.5-7B-Instruct",
+    num_paths=10,
+    noise_scale=0.3,
+    decay_rate=0.5,
+    adaptive_noise=True
+)
+
+Project Structure
+
+noisy-coconut/
+├── noisy_coconut/
+│   ├── __init__.py
+│   ├── model.py           # Main NoisyCoconut class
+│   ├── noise.py           # Noise injection utilities
+│   ├── aggregation.py     # Output aggregation strategies
+│   └── utils.py           # Helper functions
+├── scripts/
+│   ├── evaluate.py        # Benchmark evaluation
+│   └── noise_analysis.py  # Noise-accuracy characterization
+├── configs/
+│   └── default.yaml       # Default configurations
+├── tests/
+├── requirements.txt
+└── README.md
+
+Reproducing Paper Results
+Noise-Accuracy Characterization (Section 4.2)
+
+python scripts/noise_analysis.py \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --noise_scales 0.1 0.2 0.5 1.0 2.0 5.0 10.0 20.0 50.0 \
+    --benchmark gsm8k
+
+Main Experiments (Section 4.3)
+
+python scripts/evaluate.py \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --benchmarks gsm8k gsm_symbolic mmlu \
+    --num_paths 5 \
+    --noise_scale 0.2 \
+    --num_samples 1000
+
+Limitations
+
+    Open-weight models only: Requires access to internal model states
+    Computational overhead: Generates K paths per query (linear scaling)
+    Discrete responses: Best suited for tasks with well-defined answer agreement
+    Architecture sensitivity: Some models (e.g., gpt-oss-20B) require modified configurations
+
+Citation
+
+@article{anonymous2025noisycoconut,
+  title={NoisyCoconut: Counterfactual Consensus via Latent Space Reasoning},
+  author={Anonymous},
+  journal={Transactions on Machine Learning Research},
+  year={2025}
 }
-```
 
-## License
+License
 
-MIT
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+Acknowledgments
+
+This work builds on the Continuous Chain-of-Thought (Coconut) framework from Hao et al. (2025).

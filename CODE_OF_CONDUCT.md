@@ -23,13 +23,13 @@ include:
 Examples of unacceptable behavior by participants include:
 
 * The use of sexualized language or imagery and unwelcome sexual attention or
-advances
+  advances
 * Trolling, insulting/derogatory comments, and personal or political attacks
 * Public or private harassment
 * Publishing others' private information, such as a physical or electronic
-address, without explicit permission
+  address, without explicit permission
 * Other conduct which could reasonably be considered inappropriate in a
-professional setting
+  professional setting
 
 ## Our Responsibilities
 
@@ -59,8 +59,10 @@ the project or its community.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by contacting the project team at <opensource-conduct@meta.com>. All
-complaints will be reviewed and investigated and will result in a response that
+reported by contacting the project team at <span><span style="color: rgb(150, 34, 73); font-weight: bold;">&lt;your_email_here&gt;</span><span style="color: black; font-weight: normal;">. 
+
+
+All complaints will be reviewed and investigated and will result in a response that
 is deemed necessary and appropriate to the circumstances. The project team is
 obligated to maintain confidentiality with regard to the reporter of an incident.
 Further details of specific enforcement policies may be posted separately.
@@ -78,3 +80,8 @@ available at https://www.contributor-covenant.org/version/1/4/code-of-conduct.ht
 
 For answers to common questions about this code of conduct, see
 https://www.contributor-covenant.org/faq
+
+## Acknowledgments
+
+This project builds upon the [Coconut (Chain of Continuous Thought)](https://github.com/facebookresearch/coconut) framework. We are grateful to the original authors for their foundational work in latent-space reasoning.
+

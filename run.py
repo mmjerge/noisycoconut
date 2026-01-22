@@ -1,533 +1,608 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+"""
+Quick test script for Coconut branching with majority voting.
+
+This is a simplified version for quick testing and debugging of the branching
+and majority voting functionality. Use this to verify the system works before
+running larger experiments.
+
+Usage:
+    python quick_branch_test.py
+"""
 
 import torch
-import torch.distributed
-import torch.optim as optim
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-import wandb
-
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from transformers.models.gpt2.modeling_gpt2 import GPT2Block
-
-from coconut import Coconut
-from dataset import (
-    get_dataset,
-    get_question_latent_dataset,
-    get_cot_latent_dataset,
-    MyCollator,
-)
-
-from tqdm import tqdm
-from copy import copy
-import itertools
-import os, sys
-import yaml
 import json
-import gc
-import argparse
-import functools
-from utils import Config, set_seed
+import sys
+from datetime import datetime
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from coconut import Coconut
+from datasets import load_dataset
+from typing import List, Dict, Any
+import re
+from collections import Counter
+import random
+import os
+import signal
+import random
 
+# ============================================================================
+# QUICK TEST CONFIGURATION
+# ============================================================================
 
-def main():
+BENCHMARK = "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu"
+MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+NUM_QUESTIONS = 1000
+NUM_BRANCHES = 5
+MAX_NEW_TOKENS = 2056
 
-    parser = argparse.ArgumentParser(description="coconut")
-    parser.add_argument("config_file")
-    args = parser.parse_args()
+NOISE_SCALES = [0.0, 0.2]
+NOISE_TYPE = "gaussian_scaled"
+NOISE_DIRECTION = None
 
-    # init distributed environment
-    dist.init_process_group("nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(local_rank)
+RANDOM_SEED = 42
 
-    # load the configuration file
-    with open(args.config_file) as f:
-        config_dict = yaml.safe_load(f)
+# Sampling parameters
+TEMPERATURE = 0.7
+TOP_P = 0.9
 
-    if rank == 0:
-        print("Config:", config_dict)
+CHECKPOINT_INTERVAL = 100  # Save every N questions
 
-    configs = Config(config_dict)
-    set_seed(configs.seed)
-    save_dir = os.path.join(configs.save_path, configs.name)
+CHECKPOINT_FILE = f"checkpoint_{BENCHMARK}_{MODEL_NAME.replace('/', '_')}.json"
 
-    if not os.path.exists(save_dir) and rank == 0:
-        os.makedirs(save_dir)
+# ============================================================================
 
-    torch.distributed.barrier()
-    cur_ckpts = os.listdir(save_dir)
+def load_checkpoint(checkpoint_file: str) -> Dict[str, Any]:
+    """Load checkpoint if it exists."""
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            checkpoint = json.load(f)
+        print(f"✓ Loaded checkpoint: {len(checkpoint['results'])} questions completed")
+        return checkpoint
+    return None
 
-    # check if the job is preempted and resumed.
+def save_checkpoint(checkpoint_file: str, results: List[Dict], completed_ids: set, config: Dict):
+    """Save checkpoint to disk."""
+    checkpoint = {
+        "config": config,
+        "completed_question_ids": list(completed_ids),
+        "results": results,
+        "last_saved": datetime.now().isoformat()
+    }
+    temp_file = checkpoint_file + ".tmp"
+    with open(temp_file, 'w') as f:
+        json.dump(checkpoint, f, indent=2)
+    os.replace(temp_file, checkpoint_file)
+    print(f"✓ Checkpoint saved: {len(results)} questions completed")
 
-    if len(cur_ckpts) > 0 and not configs.only_eval:
-        # if there are previous checkpoints, and only_eval is False
-        # it means the previous run was preempted and the program is restarted.
-        # need to find the latest checkpoint and resume from that.
+def setup_model(model_name: str = MODEL_NAME):
+    """Initialize model and add special tokens."""
+    print(f"Loading {model_name}...")
 
-        if rank == 0:
-            print(
-                f"Warning: found previous run and gonna resume from that. the inputted `resume` argument is ignored!"
-            )
-
-        checkpoints = [f for f in cur_ckpts if f.startswith("checkpoint_")]
-        checkpoints.sort(key=lambda x: int(x.split("_")[1]))
-
-        # Get the last item in the sorted list
-        latest_checkpoint = checkpoints[-1] if checkpoints else None
-        configs.resume = int(latest_checkpoint.split("_")[1])
-        load_dir = os.path.join(configs.save_path, configs.name, latest_checkpoint)
-
-        configs.load_model_path = load_dir
-        print(f"Loading from previous run epoch_{configs.resume}!")
-
-    elif configs.resume != 0:
-        # by setting `resume`, we can skip a few epoches at the beginning.
-        if configs.load_model_path == "None":
-            print(
-                f"Warning: you want to skip the first {configs.resume} but you are not loading any existing checkpoint!"
-            )
-            # not an intended use case at this point
-        print(
-            f"Loading from {configs.load_model_path} and skip the first {configs.resume} epochs"
-        )
-
-    model = AutoModelForCausalLM.from_pretrained(configs.model_id)
-    tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.add_tokens("<|start-latent|>")
-    tokenizer.add_tokens("<|end-latent|>")
-    tokenizer.add_tokens("<|latent|>")
-    latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
-    start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
-    end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
-
-    loaded = False
-
-    if configs.load_model_path != "None":
-        saved_weights = torch.load(
-            configs.load_model_path, map_location=torch.device(rank)
-        )
-
-        if configs.coconut and not any(
-            [k.startswith("base_causallm") for k in saved_weights.keys()]
-        ):
-            # we are loading a base model into coconut model
-            # e.g., for GSM8k, we used a SFTed model to skip the stage 0
-            loaded = True
-            print(model.load_state_dict(saved_weights, strict=False))
-
-        elif not configs.coconut and any(
-            [k.startswith("base_causallm") for k in saved_weights.keys()]
-        ):
-            raise ValueError("Cannot load coconut model weights into a causallm model")
-
-        elif configs.coconut and any(
-            [k.startswith("base_causallm") for k in saved_weights.keys()]
-        ):
-            # loading from preempted run
-            # will handle later
-            pass
-
-        else:
-            # resume or evaluate sft model
-            loaded = True
-            print(model.load_state_dict(saved_weights, strict=False))
-
-    if not (configs.cot or configs.no_thoughts or configs.no_cot):
-        # if we need new tokens, initialize their embeddings and lm heads
-        model.resize_token_embeddings(len(tokenizer))
-        embeddings = model.get_input_embeddings()
-        target_id = tokenizer.convert_tokens_to_ids("<<")
-        # initialize the new token embeddings with a known token
-        # it helps stablize the training
-        for token_id in [latent_id, start_id, end_id]:
-            target_embedding = embeddings.weight.data[target_id] 
-            embeddings.weight.data[token_id] = target_embedding
-            # The input embeddings and lm heads are tied in GPT2. So the code below is not necessary
-            lm_head = model.lm_head
-            lm_head.weight.data[token_id] = lm_head.weight.data[target_id]
-
-    if configs.no_thoughts:
-        configs.c_thought = 0
-        configs.coconut = False
-
-    if configs.coconut:
-        model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
-
-    if configs.load_model_path != "None" and not loaded:
-        print(model.load_state_dict(saved_weights, strict=False))
-
-    print(f"Running FSDP on rank = {rank}, world size = {world_size}")
-    model = model.to(rank)
-
-    llama_auto_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls={
-            # GPT2Block,       # for GPT2, we don't need to shard layers (it becomes DDP)
-            LlamaDecoderLayer  # only shard llama's layers.
-        },
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        use_fast=True
     )
 
-    if configs.bf16:
-        model.to(torch.bfloat16)
-
-    # if only eval, use ddp (to avoid bugs in fsdp)
-    if configs.only_eval:
-        parallel_model = DDP(model, device_ids=[rank])
-
+    if model_name == "/scratch/mj6ux/.cache/hf_models/gpt-oss-20b":
+        dtype = torch.bfloat16
+        print("Using bfloat16")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True
+        )
     else:
-        parallel_model = FSDP(
-            model, auto_wrap_policy=llama_auto_wrap_policy, device_id=rank
+        dtype = torch.float16
+        print("Using float16")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=True
         )
 
-    del model
+    special_tokens = {
+        'additional_special_tokens': ['<|latent|>', '<|start-latent|>', '<|end-latent|>']
+    }
+    num_added = tokenizer.add_special_tokens(special_tokens)
+    print(f"Added {num_added} special tokens")
 
-    if rank == 0:
-        print(parallel_model)
+    base_model.resize_token_embeddings(len(tokenizer))
 
-    # prepare the ground truth answer and cot for evaluation
-    question_val = [d["question"] for d in json.load(open(configs.val_path))]
-    answers_val = [
-        d["answer"].replace(",", "").strip() for d in json.load(open(configs.val_path))
+    latent_token_id = tokenizer.convert_tokens_to_ids('<|latent|>')
+    start_latent_id = tokenizer.convert_tokens_to_ids('<|start-latent|>')
+    end_latent_id = tokenizer.convert_tokens_to_ids('<|end-latent|>')
+    eos_token_id = tokenizer.eos_token_id
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    print(f"✓ Model loaded!")
+    print(f"  <|latent|>: {latent_token_id}")
+    print(f"  <|start-latent|>: {start_latent_id}")
+    print(f"  <|end-latent|>: {end_latent_id}")
+
+    return tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id
+
+def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, random_seed: int = None) -> List[Dict[str, str]]:
+    """
+    Load benchmark dataset (GSM8K, GSM-Symbolic, or MMLU).
+
+    Args:
+        benchmark: One of "gsm8k", "gsm-symbolic", or "mmlu"
+        num_questions: Number of questions to load (None = all)
+        random_seed: Seed for random sampling (None = no randomization, uses first N)
+
+    Returns:
+        List of dictionaries with "question", "answer", "question_id" fields
+    """
+    print(f"\nLoading {benchmark.upper()} test set...")
+
+    if benchmark == "gsm8k":
+        dataset = load_dataset("gsm8k", "main", split="test")
+    elif benchmark == "gsm-symbolic":
+        dataset = load_dataset("apple/gsm-symbolic", split="test", trust_remote_code=True)
+    elif benchmark == "mmlu":
+        dataset = load_dataset("cais/mmlu", "all", split="test", trust_remote_code=True)
+    else:
+        raise ValueError(f"Unknown benchmark: {benchmark}. Must be one of: gsm8k, gsm-symbolic, mmlu")
+
+    # Determine which indices to use
+    total = len(dataset)
+    n = min(num_questions or total, total)
+    
+    if random_seed is not None:
+        random.seed(random_seed)
+        indices = random.sample(range(total), n)
+        print(f"Randomly sampling {n} questions (seed={random_seed})")
+    else:
+        indices = list(range(n))
+
+    # Build questions list
+    questions = []
+    answer_mapping = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
+
+    for i in indices:
+        item = dataset[i]
+        
+        if benchmark in ("gsm8k", "gsm-symbolic"):
+            questions.append({
+                "question": item["question"],
+                "answer": item["answer"],
+                "question_id": i,
+                "benchmark": benchmark
+            })
+        else:  # mmlu
+            choices_text = "\n".join([f"{chr(65+j)}. {choice}" for j, choice in enumerate(item["choices"])])
+            formatted_question = f"{item['question']}\n\n{choices_text}"
+            correct_answer = answer_mapping[item["answer"]]
+            questions.append({
+                "question": formatted_question,
+                "answer": f"#### {correct_answer}",
+                "question_id": i,
+                "benchmark": "mmlu",
+                "subject": item.get("subject", "unknown"),
+                "choices": item["choices"],
+                "correct_choice_idx": item["answer"]
+            })
+
+    print(f"Loaded {len(questions)} questions from {benchmark.upper()}")
+    return questions
+
+
+def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
+    if benchmark == "mmlu":
+        patterns = [
+            r'####\s*([A-D])',
+            r'[Tt]he answer is\s*([A-D])',
+            r'[Ss]o,?\s*the answer is\s*([A-D])',
+            r'[Hh]ence,?\s*the answer is\s*([A-D])',
+            r'[Tt]herefore,?\s*the answer is\s*([A-D])',
+            r'[Ff]inal answer[:\s]+([A-D])',
+            r'[Aa]nswer[:\s]+([A-D])',
+            r'[Cc]orrect answer is\s*([A-D])',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).upper()
+
+        last_portion = text[-500:] if len(text) > 500 else text
+        
+        final_patterns = [
+            r'is\s+([A-D])\s*[.,]',
+            r'\b([A-D])\s*\.\s*$', 
+        ]
+        
+        for pattern in final_patterns:
+            match = re.search(pattern, last_portion)
+            if match:
+                return match.group(1).upper()
+
+        return "NO_ANSWER_FOUND"
+
+    else:
+        def clean_number(num_str: str) -> str:
+            return num_str.replace(',', '').replace('$', '').strip()
+
+        patterns = [
+            r'\\boxed\{([\d,]+)\}',
+            r'####\s*([\d,]+)',
+            r'[Tt]he final answer is:?\s*\$?\s*([\d,]+)',
+            r'[Ff]inal answer:?\s*\$?\s*([\d,]+)',
+            r'[Aa]nswer:?\s*\$?\s*([\d,]+)',
+            r'is:?\s*\$?\s*([\d,]+)\s*\.?\s*$',
+        ]
+
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, text))
+            if matches:
+                return clean_number(matches[-1].group(1))
+
+        numbers = re.findall(r'[\d,]+', text)
+        if numbers:
+            cleaned_numbers = [clean_number(n) for n in numbers if clean_number(n)]
+            if cleaned_numbers:
+                return cleaned_numbers[-1]
+
+        return "NO_ANSWER_FOUND"
+
+
+def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int, model_name: str = "", benchmark: str = "gsm8k"):
+    """Create input for Coconut model with latent reasoning markers."""
+    
+    if benchmark == "mmlu":
+        instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer as 'The answer is X' where X is A, B, C, or D."
+    else:
+        instruction = f"{question}\n\nPlease solve this step by step."
+    
+    messages = [
+        {"role": "user", "content": instruction}
     ]
-    cot_val = ["\n".join(d["steps"]) for d in json.load(open(configs.val_path))]
 
-    base_dataset_valid = get_dataset(
-        configs.val_path, tokenizer, max_size=32 if configs.debug else 100000000
+    question_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_tensors='pt',
+        add_special_tokens=True
     )
 
-    if not configs.only_eval:
-        base_dataset_train = get_dataset(
-            configs.train_path, tokenizer, max_size=5000 if configs.debug else 100000000
-        )
-
-    if "gsm" in configs.val_path:
-        max_new_tokens = 64
+    if "gpt-oss" in model_name:
+        # Model expects: <|start|>assistant<|channel|>...<|message|>
+        # Insert latent markers after adding the channel structure
+        channel_token = tokenizer.convert_tokens_to_ids('<|channel|>')
+        message_token = tokenizer.convert_tokens_to_ids('<|message|>')
+        
+        # Encode "analysis" as that's the first channel it expects
+        analysis_ids = tokenizer.encode('analysis', add_special_tokens=False)
+        
+        # Build: question_ids + <|channel|> + analysis + <|message|> + <|start-latent|> + <|end-latent|>
+        channel_prefix = torch.tensor([[channel_token] + analysis_ids + [message_token]])
+        start_token = torch.tensor([[start_latent_id]])
+        end_token = torch.tensor([[end_latent_id]])
+        
+        input_ids = torch.cat([question_ids, channel_prefix, start_token, end_token], dim=1)
     else:
-        max_new_tokens = 128
+        # Standard format for other models
+        start_token = torch.tensor([[start_latent_id]])
+        end_token = torch.tensor([[end_latent_id]])
+        input_ids = torch.cat([question_ids, start_token, end_token], dim=1)
 
-    total_train_steps = 0
+    return input_ids
 
-    if not configs.debug and not configs.only_eval and rank == 0:
-        wandb_run = wandb.init(project=configs.project, name=configs.name)
-        wandb_run.config.update(configs, allow_val_change=True)
-        text_table = wandb.Table(columns=["step", "text"])
 
+def extract_generated_only(tokenizer, full_ids: torch.Tensor, original_input_ids: torch.Tensor, end_latent_id: int) -> str:
+    """Extract only the newly generated tokens after <end-latent>."""
+    end_latent_positions = (original_input_ids[0] == end_latent_id).nonzero(as_tuple=True)[0]
+
+    if len(end_latent_positions) > 0:
+        end_latent_pos_expanded = end_latent_positions[0].item() + 8
+
+        if full_ids.shape[1] > end_latent_pos_expanded + 1:
+            generated_ids = full_ids[0, end_latent_pos_expanded + 1:]
+            generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            return generated_text.strip()
+
+    original_len = original_input_ids.shape[1]
+    if full_ids.shape[1] > original_len:
+        generated_ids = full_ids[0, original_len:]
+        generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        return generated_text.strip()
+
+    return ""
+
+
+def majority_vote(answers: List[str]) -> str:
+    """Perform majority voting on a list of answers."""
+    if not answers:
+        return "NO_ANSWER_FOUND"
+
+    vote_counts = Counter(answers)
+    most_common = vote_counts.most_common(1)[0][0]
+    return most_common
+
+
+def test_question_with_branching(
+    coconut_model,
+    tokenizer,
+    question: str,
+    noise_scale: float,
+    start_latent_id: int,
+    end_latent_id: int,
+    num_branches: int,
+    temperature: float,
+    top_p: float,
+    max_new_tokens: int,
+    device: str,
+    noise_type: str,
+    noise_direction: str,
+    benchmark: str = "gsm8k",
+    model_name=MODEL_NAME 
+) -> Dict[str, Any]:
+    """Test a single question using branching generation with majority voting."""
+    coconut_model.eval()
+
+    input_ids = create_coconut_input(tokenizer, question, start_latent_id, end_latent_id, 
+                                  model_name=MODEL_NAME, benchmark=BENCHMARK)
+    original_input_ids = input_ids.clone()
+    input_ids = input_ids.to(device)
+
+    with torch.no_grad():
+        try:
+            all_branches = coconut_model.generate_with_branching(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                max_new_tokens=max_new_tokens,
+                num_branches=num_branches,
+                temperature=temperature,
+                top_p=top_p,
+                noise_scale=noise_scale,
+                noise_type=noise_type,
+                noise_direction=noise_direction,
+                model_name=model_name
+            )
+
+            branch_texts = []
+            branch_answers = []
+
+            for branch_ids in all_branches:
+                branch_text = extract_generated_only(
+                    tokenizer,
+                    branch_ids,
+                    original_input_ids,
+                    end_latent_id
+                )
+                branch_answer = extract_answer(branch_text, benchmark)
+
+                branch_texts.append(branch_text)
+                branch_answers.append(branch_answer)
+
+            majority_answer = majority_vote(branch_answers)
+            vote_distribution = dict(Counter(branch_answers))
+
+            return {
+                "success": True,
+                "branch_texts": branch_texts,
+                "branch_answers": branch_answers,
+                "majority_answer": majority_answer,
+                "vote_distribution": vote_distribution,
+                "num_branches": num_branches,
+                "error": None
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "branch_texts": [],
+                "branch_answers": [],
+                "majority_answer": "NO_ANSWER_FOUND",
+                "vote_distribution": {},
+                "num_branches": num_branches,
+                "error": str(e)
+            }
+
+
+def run_quick_test():
+    """Run a quick test of branching and majority voting."""
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    config = {
+        "benchmark": BENCHMARK,
+        "model": MODEL_NAME,
+        "num_questions": NUM_QUESTIONS,
+        "num_branches": NUM_BRANCHES,
+        "noise_scales": NOISE_SCALES,
+        "noise_type": NOISE_TYPE,
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "random_seed": RANDOM_SEED
+    }
+
+    print("\n" + "="*70)
+    print("QUICK BRANCHING + MAJORITY VOTING TEST")
+    print("="*70)
+    print(f"Model: {MODEL_NAME}")
+    print(f"Benchmark: {BENCHMARK}")
+    print(f"Questions: {NUM_QUESTIONS}")
+    print(f"Branches: {NUM_BRANCHES}")
+    print(f"Noise scales: {NOISE_SCALES}")
+    print(f"Noise type: {NOISE_TYPE}")
+    print(f"Temperature: {TEMPERATURE}, Top-p: {TOP_P}")
+    print(f"Device: {device}")
+    print("="*70)
+
+    # Check for existing checkpoint
+    checkpoint = load_checkpoint(CHECKPOINT_FILE)
+    if checkpoint:
+        results = checkpoint["results"]
+        completed_ids = set(checkpoint["completed_question_ids"])
+        print(f"Resuming from checkpoint: {len(completed_ids)} questions already done")
     else:
-        wandb_run = None
+        results = []
+        completed_ids = set()
 
-    if configs.reset_optimizer:
-        optimizer = None
+    # Setup
+    tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(MODEL_NAME)
 
+    if "gpt-oss" in MODEL_NAME:
+        hidden_layer_idx = 1
     else:
-        optimizer = optim.AdamW(
-            parallel_model.parameters(),
-            lr=configs.lr,
-            weight_decay=configs.weight_decay,
-        )
+        hidden_layer_idx = -1
 
-    best_acc = 0
+    coconut_model = Coconut(
+        base_causallm=base_model,
+        latent_token_id=latent_token_id,
+        start_latent_id=start_latent_id,
+        end_latent_id=end_latent_id,
+        eos_token_id=eos_token_id,
+        hidden_layer_idx=hidden_layer_idx
+    )
 
-    collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
+    questions = load_benchmark_dataset(BENCHMARK, NUM_QUESTIONS, random_seed=RANDOM_SEED)
 
-    for epoch in range(configs.resume, configs.num_epochs):
+    print(f"Loaded {len(questions)} questions")
+    print(f"Completed IDs from checkpoint: {len(completed_ids)}")
+    questions_to_process = [q for q in questions if q["question_id"] not in completed_ids]
+    print(f"Questions to process: {len(questions_to_process)}")
+    print(f"First few completed IDs: {list(completed_ids)[:5]}")
+    print(f"First few question IDs to process: {[q['question_id'] for q in questions_to_process[:5]]}")
 
-        scheduled_stage = (
-            0 if (configs.cot or configs.no_cot) else epoch // configs.epochs_per_stage
-        )
-        dataset_gen_val = get_question_latent_dataset(
-            scheduled_stage,
-            base_dataset_valid,
-            configs,
-            start_id,
-            latent_id,
-            end_id,
-            no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
-        )
+    questions_to_process = [q for q in questions if q["question_id"] not in completed_ids]
+    print(f"Questions remaining: {len(questions_to_process)}/{len(questions)}")
 
-        valid_gen_dataloader = torch.utils.data.DataLoader(
-            dataset_gen_val,
-            num_workers=1,
-            pin_memory=True,
-            batch_size=1,
-            collate_fn=collator,
-            sampler=DistributedSampler(dataset_gen_val, shuffle=False),
-        )
+    def sigterm_handler(signum, frame):
+        print("\n⚠ Received SIGTERM, saving checkpoint...")
+        save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
+        sys.exit(0)
 
-        if not configs.only_eval:
+    signal.signal(signal.SIGTERM, sigterm_handler)
 
-            dataset_train = get_cot_latent_dataset(
-                scheduled_stage,
-                base_dataset_train,
-                configs,
-                start_id,
-                latent_id,
-                end_id,
-                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
-                shuffle=True,
-            )
+    try:
+        for q_idx, q_data in enumerate(questions_to_process):
+            global_idx = len(completed_ids) + q_idx + 1
+            print(f"\n{'='*70}")
+            print(f"Question {global_idx}/{len(questions)} (ID: {q_data['question_id']})")
+            print(f"{'='*70}")
+            print(f"Q: {q_data['question'][:200]}...")
+            print(f"\nExpected Answer: {extract_answer(q_data['answer'], BENCHMARK)}")
 
-            train_dataloader = torch.utils.data.DataLoader(
-                dataset_train,
-                num_workers=1,
-                shuffle=False,
-                pin_memory=True,
-                batch_size=configs.batch_size_training,
-                collate_fn=collator,
-                sampler=DistributedSampler(dataset_train, shuffle=True),
-            )
+            question_results = {
+                "question_id": q_data["question_id"],
+                "question": q_data["question"],
+                "expected_answer": q_data["answer"],
+                "noise_tests": []
+            }
 
-            # the sampler is deterministic even if shuffle is set to True
-            # so we have shuffled the dataset when it's constructed (at every epoch).
+            for noise_scale in NOISE_SCALES:
+                print(f"\n{'-'*70}")
+                print(f"Testing noise={noise_scale} with {NUM_BRANCHES} branches...")
+                print(f"{'-'*70}")
 
-            dataset_loss_val = get_cot_latent_dataset(
-                scheduled_stage,
-                base_dataset_valid,
-                configs,
-                start_id,
-                latent_id,
-                end_id,
-                no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
-            )
-
-            valid_loss_dataloader = torch.utils.data.DataLoader(
-                dataset_loss_val,
-                num_workers=1,
-                shuffle=False,
-                pin_memory=True,
-                batch_size=configs.batch_size_training,
-                collate_fn=collator,
-                sampler=DistributedSampler(dataset_loss_val, shuffle=False),
-            )
-
-            if configs.reset_optimizer:
-                del optimizer
-
-                optimizer = optim.AdamW(
-                    parallel_model.parameters(),
-                    lr=configs.lr,
-                    weight_decay=configs.weight_decay,
+                result = test_question_with_branching(
+                    coconut_model=coconut_model,
+                    tokenizer=tokenizer,
+                    question=q_data["question"],
+                    noise_scale=noise_scale,
+                    start_latent_id=start_latent_id,
+                    end_latent_id=end_latent_id,
+                    num_branches=NUM_BRANCHES,
+                    temperature=TEMPERATURE,
+                    top_p=TOP_P,
+                    max_new_tokens=MAX_NEW_TOKENS,
+                    device=device,
+                    noise_type=NOISE_TYPE,
+                    noise_direction=NOISE_DIRECTION,
+                    benchmark=BENCHMARK
                 )
 
-            parallel_model.module.train()
+                if result["success"]:
+                    expected_answer = extract_answer(q_data["answer"], BENCHMARK)
+                    is_correct = result["majority_answer"] == expected_answer
 
-            total_length = len(train_dataloader) // configs.gradient_accumulation_steps
-            pbar = tqdm(
-                colour="blue",
-                desc=f"Training Epoch: {epoch+1}",
-                total=total_length,
-                dynamic_ncols=True,
-            )
+                    print(f"\n✓ Generation successful!")
+                    print(f"\nBranch answers: {result['branch_answers']}")
+                    print(f"Vote distribution: {result['vote_distribution']}")
+                    print(f"\nMajority vote: {result['majority_answer']}")
+                    print(f"Expected: {expected_answer}")
+                    print(f"Result: {'✓ CORRECT' if is_correct else '✗ INCORRECT'}")
 
-            for step, batch in enumerate(train_dataloader):
+                    if result['branch_texts']:
+                        print(f"\nExample output (Branch 1):")
+                        print(f"  {result['branch_texts'][0][:200]}...")
 
-                if step == 0 and wandb_run and rank == 0:
-                    print("logging training data")
-                    cur_bs = len(batch["input_ids"])
-                    text_str = ""
-                    for data_idx in range(cur_bs):
-                        for token_idx in range(len(batch["input_ids"][data_idx])):
-                            text_str += (
-                                str(batch["input_ids"][data_idx][token_idx].item())
-                                + " "
-                                + str(batch["labels"][data_idx][token_idx].item())
-                                + " "
-                                + tokenizer.decode(
-                                    batch["input_ids"][data_idx][token_idx]
-                                )
-                                + "\n"
-                            )
-                        text_str += "====" * 10 + "\n"
-                    text_table.add_data(total_train_steps, text_str)
-                    # copy the table due to a bug in wandb
-                    # https://github.com/wandb/wandb/issues/2981
+                    question_results["noise_tests"].append({
+                        "noise_scale": noise_scale,
+                        "branch_texts": result["branch_texts"],
+                        "branch_answers": result["branch_answers"],
+                        "majority_answer": result["majority_answer"],
+                        "vote_distribution": result["vote_distribution"],
+                        "expected_answer": expected_answer,
+                        "is_correct": is_correct,
+                        "num_branches": result["num_branches"]
+                    })
+                else:
+                    print(f"\n✗ Error: {result['error']}")
+                    question_results["noise_tests"].append({
+                        "noise_scale": noise_scale,
+                        "error": result["error"]
+                    })
 
-                    wandb_run.log({"data_table": copy(text_table)})
+            results.append(question_results)
+            completed_ids.add(q_data["question_id"])
 
-                total_train_steps += 1
-                batch = {
-                    key: batch[key].to(rank) for key in batch.keys() if key != "idx"
-                }
+            # Checkpoint every N questions
+            if len(completed_ids) % CHECKPOINT_INTERVAL == 0:
+                save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
 
-                outputs = parallel_model(**batch)
+    except KeyboardInterrupt:
+        print("\n⚠ Interrupted, saving checkpoint...")
+        save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
+        sys.exit(0)
 
-                loss = outputs.loss / configs.gradient_accumulation_steps
-                loss.backward()
+    # Final checkpoint
+    save_checkpoint(CHECKPOINT_FILE, results, completed_ids, config)
 
-                if (step + 1) % configs.gradient_accumulation_steps == 0 or step == len(
-                    train_dataloader
-                ) - 1:
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    pbar.update(1)
+    # Summary
+    print("\n" + "="*70)
+    print("TEST SUMMARY")
+    print("="*70)
 
-                if wandb_run and rank == 0:
-                    log_dict = {
-                        "train/epoch": epoch + 1,
-                        "train/step": epoch * len(train_dataloader) + step,
-                        "train/loss": loss.detach().float()
-                        * configs.gradient_accumulation_steps,
-                    }
-                    wandb_run.log(log_dict)
+    for q_idx, q_result in enumerate(results):
+        print(f"\nQuestion {q_idx + 1}: {q_result['question'][:60]}...")
+        print(f"Expected: {extract_answer(q_result['expected_answer'], BENCHMARK)}")
 
-                pbar.set_description(
-                    f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
-                    f"completed (loss: {round(float(loss.detach().float() * configs.gradient_accumulation_steps), 4)}"
-                )
-            pbar.close()
-            dist.barrier()
+        for test in q_result["noise_tests"]:
+            noise = test.get("noise_scale", "?")
+            if "majority_answer" in test:
+                majority = test["majority_answer"]
+                correct = "✓" if test.get("is_correct") else "✗"
+                print(f"  Noise={noise}: {correct} Majority={majority}, Votes={test['vote_distribution']}")
+            else:
+                print(f"  Noise={noise}: ✗ Error")
 
-            if (
-                not configs.save_only_improve
-                and not configs.debug
-                and not configs.only_eval
-            ):
-                states = parallel_model.state_dict()
-                if rank == 0:
-                    torch.save(
-                        states, os.path.join(save_dir, f"checkpoint_{epoch + 1}")
-                    )
-                    print("saving model.")
+    # Save final results
+    model_name_safe = MODEL_NAME.replace('/', '_')
+    output_file = f"noisy_coconut_{BENCHMARK}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(output_file, 'w') as f:
+        json.dump({
+            "config": config,
+            "results": results
+        }, f, indent=2)
 
-                dist.barrier()
-                del states
-                gc.collect()
-                torch.cuda.empty_cache()
-
-            # val loss
-            total_loss = 0
-
-            with torch.no_grad():
-                parallel_model.module.eval()
-                for step, batch in enumerate(valid_loss_dataloader):
-
-                    batch = {
-                        key: batch[key].to(rank) for key in batch.keys() if key != "idx"
-                    }
-
-                    outputs = parallel_model(**batch)
-                    loss = outputs.loss
-                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-                    total_loss += loss.item() / world_size
-
-                if wandb_run and rank == 0:
-
-                    log_dict = {
-                        "eval/loss": total_loss / len(valid_loss_dataloader),
-                    }
-                    wandb_run.log(log_dict)
-                    print("eval loss", total_loss / len(valid_loss_dataloader))
-
-        # val generation accuracy
-        total_length = len(valid_gen_dataloader)
-
-        pbar = tqdm(
-            colour="blue", desc=f"Test Accuracy", total=total_length, dynamic_ncols=True
-        )
-        cor, cor_cot, total = (
-            torch.tensor(0, device=rank),
-            torch.tensor(0, device=rank),
-            torch.tensor(0, device=rank),
-        )
-
-        with torch.no_grad():
-            parallel_model.module.eval()
-            for idx, batch in enumerate(valid_gen_dataloader):
-                test_idx = batch["idx"][0]
-
-                batch = {
-                    k: v.to(rank)
-                    for k, v in batch.items()
-                    if v != None and k not in ["idx", "position_ids"]
-                }
-                # https://github.com/huggingface/transformers/issues/32492
-
-                assert len(batch["input_ids"]) == 1
-                answer = answers_val[test_idx.cpu().item()]
-                answer_cot = cot_val[test_idx.cpu().item()]
-                question = question_val[test_idx.cpu().item()]
-
-                total += 1
-
-                # synced_gpus=True in FSDP mode, as we need to keep # forward pass the same on each device
-                outputs = parallel_model.module.generate(
-                    **batch,
-                    max_new_tokens=max_new_tokens,
-                    synced_gpus=not configs.only_eval,
-                )
-
-                text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                answer_output = text_output.split("#")[-1].replace(",", "").strip()
-                cot_output = (
-                    ("\n".join(text_output.split("\n")[1:])).split("#")[0].strip()
-                )
-
-                if idx < 5 and rank == 0:
-                    # print some examples
-                    print(
-                        f"Question {test_idx}: Answer = '{answer}' CoT = '{answer_cot}'"
-                    )
-                    print(f"Full output: '{tokenizer.decode(outputs[0])}'")
-                    print(f"Extracted Output: '{answer_output}'")
-
-                cor += answer_output == answer
-                cor_cot += cot_output == answer_cot
-
-                pbar.update(1)
-                pbar.set_description(
-                    f"Test accuracy: {round(float(cor.detach().float() / total.detach().float()), 2)}"
-                )
-
-            pbar.close()
-            print(f"Device {rank}: Cor={cor}, CoT={cor_cot}, Total={total}")
-
-        dist.all_reduce(cor_cot, op=dist.ReduceOp.SUM)
-        dist.all_reduce(cor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total, op=dist.ReduceOp.SUM)
-
-        cor_cot = cor_cot.item()
-        cor = cor.item()
-        total = total.item()
-        if rank == 0:
-            print(f"Accuracy on validation set: {cor} / {total} = {cor/total}")
-            print(f"CoT match on validation set: {cor_cot} / {total} = {cor_cot/total}")
-        sys.stdout.flush()
-
-        if wandb_run:
-            wandb_run.log({"eval/acc": cor / total, "eval/cot_em": cor_cot / total})
-
-        if configs.only_eval:
-            break
-
-        dist.barrier()
-        if (
-            cor / total > best_acc
-            and configs.save_only_improve
-            and not configs.debug
-            and not configs.only_eval
-        ):
-            states = parallel_model.state_dict()
-
-            if rank == 0:
-                torch.save(states, os.path.join(save_dir, f"checkpoint_{epoch + 1}"))
-                print("saving model.")
-
-            best_acc = cor / total
-
-            dist.barrier()
-            del states
-            gc.collect()
-            torch.cuda.empty_cache()
+    print(f"\n✓ Results saved to: {output_file}")
+    print("\n" + "="*70)
+    print("TEST COMPLETE!")
+    print("="*70)
 
 
 if __name__ == "__main__":
-    main()
+    # Allow overriding NUM_QUESTIONS from command line
+    if len(sys.argv) > 1:
+        NUM_QUESTIONS = int(sys.argv[1])
+        print(f"Overriding NUM_QUESTIONS to {NUM_QUESTIONS} from command line")
+
+    run_quick_test()
