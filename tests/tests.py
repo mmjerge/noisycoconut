@@ -434,6 +434,38 @@ class TestCoconutForward:
         assert outputs.loss is not None
         assert outputs.logits is not None
         assert outputs.inputs_embeds is not None
+
+    def test_hidden_state_propagation(self, coconut_model, device):
+        """Verify that hidden states are correctly fed back as embeddings."""
+        vocab_size = coconut_model.base_causallm.vocab_size
+        latent_id = coconut_model.latent_token_id
+        
+        input_ids = torch.randint(0, vocab_size - 10, (1, 10), device=device)
+        input_ids[0, 5] = latent_id
+        
+        attention_mask = torch.ones_like(input_ids)
+        labels = input_ids.clone()
+        position_ids = torch.arange(10, device=device).unsqueeze(0)
+        
+        outputs = coconut_model.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            position_ids=position_ids,
+        )
+        
+        # The embedding at position 5 should NOT be the original token embedding
+        original_latent_embed = coconut_model.embedding(
+            torch.tensor([[latent_id]], device=device)
+        )
+        
+        # After forward pass, inputs_embeds[0, 5] should be different
+        # (it should be the hidden state from position 4)
+        assert not torch.allclose(
+            outputs.inputs_embeds[0, 5, :],
+            original_latent_embed[0, 0, :],
+            atol=1e-5
+        ), "Latent position should have been replaced with hidden state"
     
     def test_forward_output_shapes(self, coconut_model, device):
         """Test that forward pass produces correct output shapes."""

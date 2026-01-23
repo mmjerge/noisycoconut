@@ -437,9 +437,10 @@ class Coconut(nn.Module):
                 batch_idx, token_idx = idx_pair
                 # Use the last hidden state from the current position directly as the
                 # next input embedding (continuous thought)
-                inputs_embeds[batch_idx, token_idx, :] = hidden_states[
-                    batch_idx, token_idx - 1 - hidden_states_offset, :
-                ]
+                inputs_embeds[batch_idx, token_idx, :] = hidden_states[batch_idx, -1, :]
+                # inputs_embeds[batch_idx, token_idx, :] = hidden_states[
+                #     batch_idx, token_idx - 1 - hidden_states_offset, :
+                # ]
 
         # Step 6: Final forward pass
         if kv_cache is not None:
