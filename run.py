@@ -94,7 +94,7 @@ def setup_model(model_name: str):
         use_fast=True
     )
 
-    if model_name == "/scratch/mj6ux/.cache/hf_models/gpt-oss-20b":
+    if "gpt-oss-20b" in model_name:
         dtype = torch.bfloat16
         print("Using bfloat16")
         base_model = AutoModelForCausalLM.from_pretrained(
