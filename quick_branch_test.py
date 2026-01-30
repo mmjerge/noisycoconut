@@ -325,7 +325,7 @@ def majority_vote(answers: List[str]) -> str:
     most_common = vote_counts.most_common(1)[0][0]
     return most_common
 
-def new_aggregation():
+def new_aggregation_aggregationtype_test_1():
     pass
 
 def test_question_with_branching(
