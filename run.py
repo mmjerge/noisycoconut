@@ -326,15 +326,45 @@ def extract_generated_only(tokenizer, full_ids: torch.Tensor, original_input_ids
 
     return ""
 
-
-def majority_vote(answers: List[str]) -> str:
-    """Perform majority voting on a list of answers."""
-    if not answers:
-        return "NO_ANSWER_FOUND"
+def new_aggregation_probability_based(answers: List[str], benchmark: str = "gsm8k") -> Dict[str, Any]:
+#2/17/2026
+#Returns majority answer and normalized probability distribution.
+#For MMLU all 4 choices are forced, with 0.0 for any that got zero votes.
+if not answers:
+    return {
+        "answer": "NO_ANSWER_FOUND",
+        "prob_distribution": {},
+        "vote_counts": {}
+    }
 
     vote_counts = Counter(answers)
-    most_common = vote_counts.most_common(1)[0][0]
-    return most_common
+    total = len(answers)
+    if benchmark == "mmlu":
+        possible = ['A', 'B', 'C', 'D']
+    else:
+        possible = list(vote_counts.keys()) #Whatever appeared
+
+        prob_distribution = {
+            choice: vote_counts.get(choice, 0) / total
+            for choice in possible
+        }
+
+        majority_answer = max(prob_distribution, key=prob_distribution.get) if prob_distribution else "NO_ANSWER_FOUND"
+
+        return {
+            "answer": majority_answer,
+            "prob_distribution": prob_distribution,
+            "vote_counts": dict(vote_counts)
+        }
+
+#def majority_vote(answers: List[str]) -> str:
+    #"""Perform majority voting on a list of answers."""
+    #if not answers:
+    #    return "NO_ANSWER_FOUND"
+#
+    #vote_counts = Counter(answers)
+    #most_common = vote_counts.most_common(1)[0][0]
+    #return most_common
 
 
 def test_question_with_branching(
@@ -392,8 +422,12 @@ def test_question_with_branching(
                 branch_texts.append(branch_text)
                 branch_answers.append(branch_answer)
 
-            majority_answer = majority_vote(branch_answers)
-            vote_distribution = dict(Counter(branch_answers))
+            agg = new_aggregation_probability_based(branch_answers, benchmark=benchmark)
+            majority_answer = agg["answer"]
+            vote_distribution = agg["vote_counts"] #keeping original counts to be backwards compatible
+            prob_distribution = agg["prob_distribution"]
+            #majority_answer = majority_vote(branch_answers)
+            #vote_distribution = dict(Counter(branch_answers))
 
             return {
                 "success": True,
@@ -401,6 +435,7 @@ def test_question_with_branching(
                 "branch_answers": branch_answers,
                 "majority_answer": majority_answer,
                 "vote_distribution": vote_distribution,
+                "prob_distribution": prob_distribution,
                 "num_branches": num_branches,
                 "error": None
             }
@@ -412,6 +447,7 @@ def test_question_with_branching(
                 "branch_answers": [],
                 "majority_answer": "NO_ANSWER_FOUND",
                 "vote_distribution": {},
+                "prob_distribution": {},
                 "num_branches": num_branches,
                 "error": str(e)
             }
@@ -544,6 +580,7 @@ def run_quick_test(cfg: DictConfig):
                         "branch_answers": result["branch_answers"],
                         "majority_answer": result["majority_answer"],
                         "vote_distribution": result["vote_distribution"],
+                        "prob_distribution": result["prob_distribution"],
                         "expected_answer": expected_answer,
                         "is_correct": is_correct,
                         "num_branches": result["num_branches"]

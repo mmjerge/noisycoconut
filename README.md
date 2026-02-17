@@ -60,6 +60,10 @@ python data.py --stats
 ### Run Experiments
 
 ```bash
+
+# Initialie Conda
+conda activate coconut
+
 # Run with default configuration (args/noisy-coconut.yaml)
 python run.py --config args/noisy-coconut.yaml
 
