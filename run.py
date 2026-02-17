@@ -330,12 +330,12 @@ def new_aggregation_probability_based(answers: List[str], benchmark: str = "gsm8
 #2/17/2026
 #Returns majority answer and normalized probability distribution.
 #For MMLU all 4 choices are forced, with 0.0 for any that got zero votes.
-if not answers:
-    return {
-        "answer": "NO_ANSWER_FOUND",
-        "prob_distribution": {},
-        "vote_counts": {}
-    }
+    if not answers:
+        return {
+            "answer": "NO_ANSWER_FOUND",
+            "prob_distribution": {},
+            "vote_counts": {}
+        }
 
     vote_counts = Counter(answers)
     total = len(answers)
