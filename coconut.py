@@ -487,12 +487,15 @@ class Coconut(nn.Module):
         noise_at_step: int = 1,
         model_name: str = "",
         **kwargs
-    ) -> List[torch.Tensor]:
+    
+    ) -> List[Tuple[torch.Tensor, List[float]]]:
         """
         Generate N diverse sequences by branching after a specified noisy latent pass.
         
         Handles sliding window attention models (like gpt-oss) by avoiding KV cache
         when sequence length exceeds the window size.
+
+        Returns list of (generated_sequence_ids, per_token_log_probs) tuples, one per branch.
         """
         assert input_ids.shape[0] == 1, "only support batch_size == 1"
         assert 1 <= noise_at_step <= MAX_N_LATENT, f"noise_at_step must be between 1 and {MAX_N_LATENT}"
@@ -646,10 +649,12 @@ class Coconut(nn.Module):
 
         print(f"Step 3: Final pass and autoregressive generation for each branch...")
 
-        all_generated_sequences = []
+        all_generated_sequences: List[Tuple[torch.Tensor, List[float]]] = []
 
         for branch_idx, branch in enumerate(all_branches):
             print(f"  Branch {branch_idx + 1}/{num_branches}...", end=" ")
+
+            token_log_probs: List[float] = []
 
             # Full sequence
             seq_len = input_ids.shape[1]
@@ -662,7 +667,9 @@ class Coconut(nn.Module):
             )
 
             # Sample first token
-            logits = outputs.logits[0, -1] / temperature
+            raw_logits = outputs.logits[0, -1]
+            log_probs_full = torch.log_softmax(raw_logits, dim=-1)
+            logits = raw_logits / temperature
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
             cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
             sorted_indices_to_remove = cumulative_probs > top_p
@@ -673,6 +680,8 @@ class Coconut(nn.Module):
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).item()
 
+            token_log_probs.append(log_probs_full[next_token].item())
+
             branch['tokens'].append(next_token)
             new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
             new_inputs_embeds = torch.cat((branch['inputs_embeds'], new_token_embed), dim=1)
@@ -680,7 +689,10 @@ class Coconut(nn.Module):
             # Autoregressive generation
             for _ in range(max_new_tokens - 1):
                 outputs = self.base_causallm(inputs_embeds=new_inputs_embeds)
-                logits = outputs.logits[0, -1] / temperature
+                
+                raw_logits = outputs.logits[0, -1]
+                log_probs_full = torch.log_softmax(raw_logits, dim=-1)
+                logits = raw_logits / temperature
 
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
@@ -695,12 +707,14 @@ class Coconut(nn.Module):
                 if next_token == self.eos_token_id:
                     break
 
+                token_log_probs.append(log_probs_full[next_token].item())
+
                 branch['tokens'].append(next_token)
                 new_token_embed = self.embedding(torch.tensor(next_token, device=device)).view(1, 1, -1)
                 new_inputs_embeds = torch.cat((new_inputs_embeds, new_token_embed), dim=1)
 
             generated_sequence = torch.tensor(branch['tokens'], device=input_ids.device).view(1, -1)
-            all_generated_sequences.append(generated_sequence)
+            all_generated_sequences.append((generated_sequence, token_log_probs))
             print(f"{len(branch['tokens']) - input_ids.shape[1]} new tokens")
 
         print(f"=== Completed {num_branches} branches ===\n")
