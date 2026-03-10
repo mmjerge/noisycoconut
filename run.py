@@ -340,6 +340,9 @@ def new_aggregation_probability_based(
             "answer": "NO_ANSWER_FOUND",
             "prob_distribution": {},
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> fecbb5b (Aggregation V2 Completed, 10 tests done of 200.)
             "vote_counts": {},
             "branch_weights": []
         }
@@ -362,10 +365,13 @@ def new_aggregation_probability_based(
 # removed previous counting implementation
 #    vote_counts = Counter(answers)
 #    total = len(answers)
+<<<<<<< HEAD
 =======
             "vote_counts": {}
         }
 >>>>>>> 8d3038f (Fixed indent in new aggregation method)
+=======
+>>>>>>> fecbb5b (Aggregation V2 Completed, 10 tests done of 200.)
 
     if benchmark == "mmlu":
         possible = ['A', 'B', 'C', 'D']
