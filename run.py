@@ -6,9 +6,9 @@ and majority voting functionality. Use this to verify the system works before
 running larger experiments.
 
 Usage:
-    python run.py                    # Use default config.yaml
-    python run.py --config my.yaml   # Use custom config file
-    python run.py experiment.num_questions=50  # Override via CLI
+    python quick_branch_test.py                    # Use default config.yaml
+    python quick_branch_test.py --config my.yaml   # Use custom config file
+    python quick_branch_test.py experiment.num_questions=50  # Override via CLI
 """
 
 import torch
@@ -19,13 +19,12 @@ from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from coconut import Coconut
 from datasets import load_dataset
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import re
 from collections import Counter
 import random
 import os
 import signal
-import math
 
 from omegaconf import OmegaConf, DictConfig
 from tqdm import tqdm
@@ -327,88 +326,15 @@ def extract_generated_only(tokenizer, full_ids: torch.Tensor, original_input_ids
 
     return ""
 
-def new_aggregation_probability_based(
-    answers: List[str], 
-    branch_log_probs: Optional[List[List[float]]] = None, 
-    benchmark: str = "gsm8k"
-) -> Dict[str, Any]:
-#2/17/2026
-#Returns majority answer and normalized probability distribution.
-#For MMLU all 4 choices are forced, with 0.0 for any that got zero votes.
+
+def majority_vote(answers: List[str]) -> str:
+    """Perform majority voting on a list of answers."""
     if not answers:
-        return {
-            "answer": "NO_ANSWER_FOUND",
-            "prob_distribution": {},
-            "vote_counts": {},
-            "branch_weights": []
-        }
+        return "NO_ANSWER_FOUND"
 
-# compute a scalar weight per branch fromits token-level log-probs
-# Geometric mean probability = exp(mean(log_probs)), which stays in (0,1].
-# Branches the model was more confident about get higher weight.
-    branch_weights: List[float] = []
-    if branch_log_probs and len(branch_log_probs) == len(answers):
-        for log_probs in branch_log_probs:
-            if log_probs:
-                mean_lp = sum(log_probs) / len(log_probs)
-                weight = math.exp(mean_lp)
-            else:
-                weight = 1.0
-            branch_weights.append(weight)
-    else:
-        branch_weights = [1.0] * len(answers)                
-
-# removed previous counting implementation
-#    vote_counts = Counter(answers)
-#    total = len(answers)
-
-
-    if benchmark == "mmlu":
-        possible = ['A', 'B', 'C', 'D']
-    else:
-        possible = list(Counter(answers).keys())
-
-    # accumulate weighted votes per answer instead of raw counts
-    weighted_votes: Dict[str, float] = {}
-    for answer, weight in zip(answers, branch_weights):
-        weighted_votes[answer] = weighted_votes.get(answer, 0.0) + weight
-
-    # ensure all MMLU chaoices appear even with zero weight
-    if benchmark == "mmlu":
-        for choice in possible:
-            if choice not in weighted_votes:
-                weighted_votes[choice] = 0.0
-    
-    # Normalize weighted_votes to a probability distribution instead of raw counts
-    total_weight = sum(weighted_votes.values())
-    if total_weight > 0:
-        prob_distribution = {k: v /total_weight for k, v in weighted_votes.items()}
-    else:
-        prob_distribution = {k: 0.0 for k in weighted_votes}
-
-        # Removed previous implementation
-        #prob_distribution = {
-         #   choice: vote_counts.get(choice, 0) / total
-        #    for choice in possible
-        #}
-
-    majority_answer = max(prob_distribution, key=prob_distribution.get) if prob_distribution else "NO_ANSWER_FOUND"
-
-    return {
-        "answer": majority_answer,
-        "prob_distribution": prob_distribution,
-        "vote_counts": weighted_votes,
-        "branch_weights": branch_weights
-    }
-
-#def majority_vote(answers: List[str]) -> str:
-    #"""Perform majority voting on a list of answers."""
-    #if not answers:
-    #    return "NO_ANSWER_FOUND"
-#
-    #vote_counts = Counter(answers)
-    #most_common = vote_counts.most_common(1)[0][0]
-    #return most_common
+    vote_counts = Counter(answers)
+    most_common = vote_counts.most_common(1)[0][0]
+    return most_common
 
 
 def test_question_with_branching(
@@ -453,9 +379,8 @@ def test_question_with_branching(
 
             branch_texts = []
             branch_answers = []
-            branch_log_probs = []
 
-            for branch_ids, token_log_probs in all_branches:
+            for branch_ids, _ in all_branches:
                 branch_text = extract_generated_only(
                     tokenizer,
                     branch_ids,
@@ -466,40 +391,16 @@ def test_question_with_branching(
 
                 branch_texts.append(branch_text)
                 branch_answers.append(branch_answer)
-                branch_log_probs.append(token_log_probs)
 
-            agg = new_aggregation_probability_based(
-                branch_answers, 
-                branch_log_probs=branch_log_probs, 
-                benchmark=benchmark)
-            majority_answer = agg["answer"]
-            vote_distribution = agg["vote_counts"] #keeping original counts to be backwards compatible
-            prob_distribution = agg["prob_distribution"]
-
-            total_weight = sum(vote_distribution.values())
-            answer_breakdown = {
-                answer: {
-                    "total_weighted_votes": round(weight, 6),
-                    "percentage": round(weight / total_weight * 100, 2) if total_weight > 0 else 0.0,
-                    "branch_count": branch_answers.count(answer),
-                    "majority_winner": answer == majority_answer
-                }
-                for answer, weight in sorted(
-                    vote_distribution.items(), key=lambda x: x[1], reverse=True
-                )
-            }
-            #majority_answer = majority_vote(branch_answers)
-            #vote_distribution = dict(Counter(branch_answers))
+            majority_answer = majority_vote(branch_answers)
+            vote_distribution = dict(Counter(branch_answers))
 
             return {
                 "success": True,
                 "branch_texts": branch_texts,
                 "branch_answers": branch_answers,
-                "branch_log_probs": branch_log_probs,
                 "majority_answer": majority_answer,
                 "vote_distribution": vote_distribution,
-                "prob_distribution": prob_distribution,
-                "answer_breakdown": answer_breakdown,
                 "num_branches": num_branches,
                 "error": None
             }
@@ -509,11 +410,8 @@ def test_question_with_branching(
                 "success": False,
                 "branch_texts": [],
                 "branch_answers": [],
-                "branch_log_probs": [],
                 "majority_answer": "NO_ANSWER_FOUND",
                 "vote_distribution": {},
-                "prob_distribution": {},
-                "answer_breakdown": {},
                 "num_branches": num_branches,
                 "error": str(e)
             }
@@ -644,11 +542,8 @@ def run_quick_test(cfg: DictConfig):
                         "noise_scale": noise_scale,
                         "branch_texts": result["branch_texts"],
                         "branch_answers": result["branch_answers"],
-                        "branch_log_probs": result["branch_log_probs"],
                         "majority_answer": result["majority_answer"],
                         "vote_distribution": result["vote_distribution"],
-                        "prob_distribution": result["prob_distribution"],
-                        "answer_breakdown": result["answer_breakdown"],
                         "expected_answer": expected_answer,
                         "is_correct": is_correct,
                         "num_branches": result["num_branches"]
