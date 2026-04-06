@@ -57,7 +57,7 @@ python data.py --force
 python data.py --stats
 ```
 
-### Run Experiments
+### Run Majority Vote Experiments
 
 ```bash
 
@@ -72,6 +72,23 @@ python run.py --config args/noisy-coconut.yaml experiment.num_questions=50
 
 # Run with custom config file
 python run.py --config my_config.yaml
+```
+
+### Run Logits Experiments
+
+```bash
+
+# Initialie Conda
+conda activate coconut
+
+# Run with default configuration (args/noisy-coconut.yaml)
+python run_logits.py --config args/noisy-coconut.yaml
+
+# Override configuration via CLI
+python run_logits.py --config args/noisy-coconut.yaml experiment.num_questions=50
+
+# Run with custom config file
+python run_logits.py --config my_config.yaml
 ```
 
 ## Configuration
@@ -137,7 +154,8 @@ We evaluate on three benchmarks:
 ```
 noisycoconut/
 ├── coconut.py              # Core Coconut model with noise injection
-├── run.py                  # Main experiment runner with branching & voting
+├── run.py                  # Main experiment runner with majority vote branching & voting
+├── run_logits.py           # Main experiment runner with logits-majority branching & voting
 ├── data.py                 # Dataset downloading and processing utilities
 ├── requirements.txt        # Python dependencies
 ├── args/
