@@ -24,7 +24,7 @@ sampling:
 
 # Checkpointing
 checkpoint:
-  interval: 100  # Save every N questions
+  interval: 10  # Save every N questions
   # File name is auto-generated based on benchmark and model
 
 # Output directory
