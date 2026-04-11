@@ -365,7 +365,7 @@ def new_aggregation_probability_based(
     benchmark: str = "gsm8k"
 ) -> Dict[str, Any]:
     # 04/11/2026
-    # Length-normalised log-probability aggregation.
+    # Length-normalised log-probability aggregation
     # All arithmetic is performed at 100 decimal digits of precision using
     # mpmath (for exp/log) and Python's decimal module (for sums/divisions).
     if not answers:
