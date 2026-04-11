@@ -25,10 +25,23 @@ from collections import Counter
 import random
 import os
 import signal
+from decimal import Decimal, getcontext
+import mpmath
 
 from omegaconf import OmegaConf, DictConfig
 from tqdm import tqdm
 
+# Settings for higher precision
+_PREC = 100
+mpmath.mp.dps = _PREC
+getcontext().prec = _PREC + 10
+
+# Higher precision setup
+def _dec_to_str(d) -> str:
+    """Serialise a Decimal or mpmath.mpf to a full-precision string."""
+    if isinstance(d, mpmath.mpf):
+        return mpmath.nstr(d, _PREC, strip_zeros=False)
+    return format(Decimal(str(d)), 'f')
 
 def load_config(config_path: str = "config.yaml") -> DictConfig:
     """Load configuration from YAML file and merge with CLI overrides."""
@@ -588,9 +601,9 @@ def run_quick_test(cfg: DictConfig):
     print("\nAccuracy by noise scale:")
     for noise_scale in cfg.noise.scales:
         if total_count[noise_scale] > 0:
-            acc = total_correct[noise_scale] / total_count[noise_scale] * 100
-            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({acc:.2f}%)")
-
+            hp_acc = Decimal(total_correct[noise_scale]) / Decimal(total_count[noise_scale]) * Decimal(100)
+            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({_dec_to_str(hp_acc)[:8]}%)")
+            
     # Save final results
     results_dir = get_results_dir(cfg)
     model_name_safe = cfg.model.name.replace('/', '_')
@@ -606,7 +619,10 @@ def run_quick_test(cfg: DictConfig):
                     str(scale): {
                         "correct": total_correct[scale],
                         "total": total_count[scale],
-                        "accuracy": total_correct[scale] / total_count[scale] if total_count[scale] > 0 else 0
+                        "accuracy": _dec_to_str(
+                            Decimal(total_correct[scale]) / Decimal(total_count[scale])
+                            if total_count[scale] > 0 else Decimal(0)
+                        )
                     }
                     for scale in cfg.noise.scales
                 }
