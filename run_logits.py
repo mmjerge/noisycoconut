@@ -26,10 +26,42 @@ import random
 import os
 import signal
 import math
+from decimal import Decimal, getcontext, ROUND_HALF_UP
+import mpmath
 
 from omegaconf import OmegaConf, DictConfig
 from tqdm import tqdm
 
+# High precision setup
+_PREC = 100
+mpmath.mp.dps = _PREC          # decimal places for mpmath
+getcontext().prec = _PREC + 10  # a few guard digits for Decimal arithmetic
+
+def _to_mp(x) -> mpmath.mpf:
+    """Convert float/int/str to an mpmath high-precision float."""
+    return mpmath.mpf(str(x))
+
+
+def _mp_exp(x) -> mpmath.mpf:
+    return mpmath.exp(_to_mp(x))
+
+
+def _hp_mean(values: List[float]) -> Decimal:
+    """Return the arithmetic mean of *values* as a 100-digit Decimal."""
+    if not values:
+        return Decimal(0)
+    total = sum(Decimal(str(v)) for v in values)
+    return total / Decimal(len(values))
+
+
+def _hp_sum(values: List[float]) -> Decimal:
+    return sum(Decimal(str(v)) for v in values)
+
+def _dec_to_str(d) -> str:
+    """Serialise a Decimal or mpmath.mpf to a full-precision string."""
+    if isinstance(d, mpmath.mpf):
+        return mpmath.nstr(d, _PREC, strip_zeros=False)
+    return format(Decimal(str(d)), 'f')
 
 def load_config(config_path: str = "config.yaml") -> DictConfig:
     """Load configuration from YAML file and merge with CLI overrides."""
@@ -328,12 +360,14 @@ def extract_generated_only(tokenizer, full_ids: torch.Tensor, original_input_ids
     return ""
 
 def new_aggregation_probability_based(
-    answers: List[str], 
-    branch_log_probs: Optional[List[List[float]]] = None, 
+    answers: List[str],
+    branch_log_probs: Optional[List[List[float]]] = None,
     benchmark: str = "gsm8k"
 ) -> Dict[str, Any]:
-# 04/02/2026
-# I didn't really comment in the most recent implementation but this version is using a length-normalized log-probability which should resolve previous issues
+    # 04/11/2026
+    # Length-normalised log-probability aggregation.
+    # All arithmetic is performed at 100 decimal digits of precision using
+    # mpmath (for exp/log) and Python's decimal module (for sums/divisions).
     if not answers:
         return {
             "answer": "NO_ANSWER_FOUND",
@@ -342,52 +376,63 @@ def new_aggregation_probability_based(
             "branch_weights": []
         }
 
-    scores: List[float] = []
+    # compute length-normalised scores at high precision 
+    hp_scores: List[mpmath.mpf] = []
     if branch_log_probs and len(branch_log_probs) == len(answers):
         for log_probs in branch_log_probs:
             if log_probs:
-                scores.append(sum(log_probs) / len(log_probs))
+                hp_mean_lp = _hp_mean(log_probs)
+                hp_scores.append(_to_mp(hp_mean_lp))
             else:
-                scores.append(0.0)
+                hp_scores.append(_to_mp(0))
     else:
-        # Fallback
-        scores = [0.0] * len(answers)
-    max_score = max(scores)
-    exp_scores = [math.exp(s - max_score) for s in scores]
-    total_exp = sum(exp_scores)
-    branch_weights: List[float] = [e / total_exp for e in exp_scores]                
+        hp_scores = [_to_mp(0)] * len(answers)
 
+    # numerically stable softmax at high precision
+    max_score: mpmath.mpf = max(hp_scores)
+    exp_scores: List[mpmath.mpf] = [_mp_exp(s - max_score) for s in hp_scores]
+    total_exp: mpmath.mpf = sum(exp_scores)
+    hp_weights: List[mpmath.mpf] = [e / total_exp for e in exp_scores]
+
+    # accumulate weighted votes 
     if benchmark == "mmlu":
         possible = ['A', 'B', 'C', 'D']
     else:
         possible = list(Counter(answers).keys())
- 
-    weighted_votes: Dict[str, float] = {}
-    for answer, weight in zip(answers, branch_weights):
-        weighted_votes[answer] = weighted_votes.get(answer, 0.0) + weight
- 
+
+    hp_weighted_votes: Dict[str, mpmath.mpf] = {}
+    for answer, weight in zip(answers, hp_weights):
+        hp_weighted_votes[answer] = hp_weighted_votes.get(answer, _to_mp(0)) + weight
+
     if benchmark == "mmlu":
         for choice in possible:
-            if choice not in weighted_votes:
-                weighted_votes[choice] = 0.0
-    
-    total_weight = sum(weighted_votes.values())
-    if total_weight > 0:
-        prob_distribution = {k: v / total_weight for k, v in weighted_votes.items()}
+            if choice not in hp_weighted_votes:
+                hp_weighted_votes[choice] = _to_mp(0)
+
+    # normalise to probability distribution
+    total_weight: mpmath.mpf = sum(hp_weighted_votes.values())
+    if total_weight > _to_mp(0):
+        hp_prob_dist: Dict[str, mpmath.mpf] = {
+            k: v / total_weight for k, v in hp_weighted_votes.items()
+        }
     else:
-        prob_distribution = {k: 0.0 for k in weighted_votes}
- 
+        hp_prob_dist = {k: _to_mp(0) for k in hp_weighted_votes}
+
     majority_answer = (
-        max(prob_distribution, key=prob_distribution.get)
-        if prob_distribution
+        max(hp_prob_dist, key=hp_prob_dist.get)
+        if hp_prob_dist
         else "NO_ANSWER_FOUND"
     )
- 
+
+    prob_distribution = {k: _dec_to_str(v) for k, v in hp_prob_dist.items()}
+    vote_counts       = {k: _dec_to_str(v) for k, v in hp_weighted_votes.items()}
+    branch_weights    = [_dec_to_str(w)    for w in hp_weights]
+
     return {
-        "answer": majority_answer,
+        "answer":            majority_answer,
         "prob_distribution": prob_distribution,
-        "vote_counts": weighted_votes,
-        "branch_weights": branch_weights
+        "vote_counts":       vote_counts,
+        "branch_weights":    branch_weights,
     }
 
 #def majority_vote(answers: List[str]) -> str:
@@ -459,21 +504,24 @@ def test_question_with_branching(
                 branch_log_probs.append(token_log_probs)
 
                 if token_log_probs:
-                    mean_lp = sum(token_log_probs) / len(token_log_probs)
+                    hp_mean_lp = _hp_mean(token_log_probs)
+                    hp_sum_lp  = _hp_sum(token_log_probs)
+                    hp_min_lp  = min(Decimal(str(v)) for v in token_log_probs)
+                    hp_max_lp  = max(Decimal(str(v)) for v in token_log_probs)
                     branch_log_prob_stats.append({
-                        "mean_log_prob": round(mean_lp, 6),
-                        "sum_log_prob": round(sum(token_log_probs), 4),
-                        "num_tokens": len(token_log_probs),
-                        "min_log_prob": round(min(token_log_probs), 6),
-                        "max_log_prob": round(max(token_log_probs), 6),
+                        "mean_log_prob": _dec_to_str(hp_mean_lp),
+                        "sum_log_prob":  _dec_to_str(hp_sum_lp),
+                        "num_tokens":    len(token_log_probs),
+                        "min_log_prob":  _dec_to_str(hp_min_lp),
+                        "max_log_prob":  _dec_to_str(hp_max_lp),
                     })
                 else:
                     branch_log_prob_stats.append({
                         "mean_log_prob": None,
-                        "sum_log_prob": None,
-                        "num_tokens": 0,
-                        "min_log_prob": None,
-                        "max_log_prob": None,
+                        "sum_log_prob":  None,
+                        "num_tokens":    0,
+                        "min_log_prob":  None,
+                        "max_log_prob":  None,
                     })
 
             agg = new_aggregation_probability_based(
@@ -485,27 +533,31 @@ def test_question_with_branching(
             prob_distribution = agg["prob_distribution"]
             branch_weights = agg["branch_weights"]
 
-            total_weight = sum(vote_distribution.values())
+            total_weight = sum(
+                _to_mp(v) for v in vote_distribution.values()
+            )
             answer_breakdown = {
                 answer: {
-                    "total_weighted_votes": round(weight, 6),
-                    "percentage": round(weight / total_weight * 100, 2) if total_weight > 0 else 0.0,
+                    "total_weighted_votes": weight if isinstance(weight, str) else _dec_to_str(weight),
+                    "percentage": _dec_to_str(
+                        _to_mp(weight) / total_weight * _to_mp(100)
+                    ) if total_weight > _to_mp(0) else "0",
                     "branch_count": branch_answers.count(answer),
                     "majority_winner": answer == majority_answer
                 }
                 for answer, weight in sorted(
-                    vote_distribution.items(), key=lambda x: x[1], reverse=True
+                    vote_distribution.items(),
+                    key=lambda x: _to_mp(x[1]),
+                    reverse=True
                 )
             }
-            #majority_answer = majority_vote(branch_answers)
-            #vote_distribution = dict(Counter(branch_answers))
 
             return {
                 "success": True,
                 "branch_texts": branch_texts,
                 "branch_answers": branch_answers,
                 "branch_log_prob_stats": branch_log_prob_stats,
-                "branch_weights": [round(w, 6) for w in branch_weights],
+                "branch_weights": branch_weights,
                 "majority_answer": majority_answer,
                 "vote_distribution": vote_distribution,
                 "prob_distribution": prob_distribution,
@@ -704,14 +756,15 @@ def run_quick_test(cfg: DictConfig):
     print("\nAccuracy by noise scale:")
     for noise_scale in cfg.noise.scales:
         if total_count[noise_scale] > 0:
-            acc = total_correct[noise_scale] / total_count[noise_scale] * 100
-            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({acc:.2f}%)")
+            hp_acc = Decimal(total_correct[noise_scale]) / Decimal(total_count[noise_scale]) * Decimal(100)
+            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({_dec_to_str(hp_acc)[:8]}%)")
 
     # Save final results
     results_dir = get_results_dir(cfg)
     model_name_safe = cfg.model.name.replace('/', '_')
-    output_file = results_dir / f"noisy_coconut_{cfg.benchmark}_{model_name_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_file = results_dir / f"noisy_coconut_{cfg.benchmark}_{model_name_safe}_{timestamp}.json"
+
     with open(output_file, 'w') as f:
         json.dump({
             "config": config_dict,
@@ -722,7 +775,10 @@ def run_quick_test(cfg: DictConfig):
                     str(scale): {
                         "correct": total_correct[scale],
                         "total": total_count[scale],
-                        "accuracy": total_correct[scale] / total_count[scale] if total_count[scale] > 0 else 0
+                        "accuracy": _dec_to_str(
+                            Decimal(total_correct[scale]) / Decimal(total_count[scale])
+                            if total_count[scale] > 0 else Decimal(0)
+                        )
                     }
                     for scale in cfg.noise.scales
                 }
@@ -730,6 +786,80 @@ def run_quick_test(cfg: DictConfig):
         }, f, indent=2)
 
     print(f"\n✓ Results saved to: {output_file}")
+
+    # Second JSON file with full per-token logits for every branch
+    logits_output_file = results_dir / f"logits_{cfg.benchmark}_{model_name_safe}_{timestamp}.json"
+
+    logits_records = []
+    for q_result in results:
+        q_logits_entry = {
+            "question_id": q_result["question_id"],
+            "noise_tests": []
+        }
+        for test in q_result.get("noise_tests", []):
+            if "error" in test and "branch_log_prob_stats" not in test:
+                q_logits_entry["noise_tests"].append({
+                    "noise_scale": test.get("noise_scale"),
+                    "error": test.get("error")
+                })
+                continue
+
+            branch_logits_list = []
+            for branch_idx, stats in enumerate(test.get("branch_log_prob_stats", [])):
+                branch_logits_list.append({
+                    "branch_index": branch_idx,
+                    "branch_answer": (
+                        test["branch_answers"][branch_idx]
+                        if branch_idx < len(test.get("branch_answers", []))
+                        else None
+                    ),
+                    "branch_weight": (
+                        test["branch_weights"][branch_idx]
+                        if branch_idx < len(test.get("branch_weights", []))
+                        else None
+                    ),
+                    "num_tokens":    stats.get("num_tokens"),
+                    "mean_log_prob": stats.get("mean_log_prob"),
+                    "sum_log_prob":  stats.get("sum_log_prob"),
+                    "min_log_prob":  stats.get("min_log_prob"),
+                    "max_log_prob":  stats.get("max_log_prob"),
+                    "raw_log_probs": stats.get("raw_log_probs", []),
+                })
+
+            q_logits_entry["noise_tests"].append({
+                "noise_scale":     test.get("noise_scale"),
+                "majority_answer": test.get("majority_answer"),
+                "branches":        branch_logits_list,
+            })
+
+        logits_records.append(q_logits_entry)
+
+    with open(logits_output_file, 'w') as f:
+        json.dump({
+            "config":      config_dict,
+            "description": (
+                "Per-branch, per-token log-probability data for every question "
+                "and noise scale. Each entry contains the raw log-prob of every "
+                "generated token, stored at full float precision as strings."
+            ),
+            "summary": {
+                "total_questions": len(results),
+                "accuracy_by_noise": {
+                    str(scale): {
+                        "correct": total_correct[scale],
+                        "total":   total_count[scale],
+                        "accuracy": _dec_to_str(
+                            Decimal(total_correct[scale]) / Decimal(total_count[scale])
+                            if total_count[scale] > 0 else Decimal(0)
+                        )
+                    }
+                    for scale in cfg.noise.scales
+                }
+            },
+            "logits_by_question": logits_records,
+        }, f, indent=2)
+
+    print(f"✓ Logits saved to:   {logits_output_file}")
     print("\n" + "="*70)
     print("TEST COMPLETE!")
     print("="*70)
