@@ -22,19 +22,20 @@ def download_benchmarks(
     force_redownload: bool = False
 ) -> dict:
     """
-    Download GSM8K, GSM-Symbolic, and MMLU benchmarks to a data directory.
-    
+    Download GSM8K, GSM-Symbolic, MMLU, MATH, and GPQA benchmarks to a data directory.
+
     Args:
         data_dir: Directory to save the downloaded datasets
-        benchmarks: List of benchmarks to download. Options: "gsm8k", "gsm-symbolic", "mmlu"
-                   If None, downloads all benchmarks.
+        benchmarks: List of benchmarks to download. Options: "gsm8k", "gsm-symbolic",
+                    "mmlu", "math", "gpqa", "gpqa-diamond", "gpqa-extended".
+                    If None, downloads all benchmarks.
         force_redownload: If True, redownload even if files exist
-    
+
     Returns:
         Dictionary mapping benchmark names to their save paths
     """
     if benchmarks is None:
-        benchmarks = ["gsm8k", "gsm-symbolic", "mmlu"]
+        benchmarks = ["gsm8k", "gsm-symbolic", "mmlu", "math", "gpqa", "gpqa-diamond", "gpqa-extended"]
     
     data_path = Path(data_dir).expanduser()
     data_path.mkdir(parents=True, exist_ok=True)
@@ -55,6 +56,10 @@ def download_benchmarks(
             saved_paths[benchmark] = _download_gsm_symbolic(benchmark_dir, force_redownload)
         elif benchmark == "mmlu":
             saved_paths[benchmark] = _download_mmlu(benchmark_dir, force_redownload)
+        elif benchmark == "math":
+            saved_paths[benchmark] = _download_math(benchmark_dir, force_redownload)
+        elif benchmark in ("gpqa", "gpqa-diamond", "gpqa-extended"):
+            saved_paths[benchmark] = _download_gpqa(benchmark_dir, benchmark, force_redownload)
         else:
             print(f"Unknown benchmark: {benchmark}. Skipping.")
             continue
@@ -225,12 +230,86 @@ def _download_mmlu(benchmark_dir: Path, force_redownload: bool) -> dict:
     return paths
 
 
+def _download_math(benchmark_dir: Path, force_redownload: bool) -> dict:
+    """Download lighteval/MATH dataset."""
+    paths = {}
+
+    for split in ["train", "test"]:
+        output_file = benchmark_dir / f"{split}.json"
+
+        if output_file.exists() and not force_redownload:
+            print(f"  {split} already exists: {output_file}")
+            paths[split] = str(output_file)
+            continue
+
+        print(f"  Downloading {split} split...")
+        dataset = load_dataset("nlile/hendrycks-MATH-benchmark", split=split)
+
+        data = []
+        for idx, item in enumerate(tqdm(dataset, desc=f"  Processing {split}")):
+            data.append({
+                "question": item["problem"],
+                "answer": item["answer"],
+                "level": item.get("level", ""),
+                "subject": item.get("subject", ""),
+                "idx": idx
+            })
+
+        with open(output_file, 'w') as f:
+            json.dump(data, f, indent=2)
+
+        print(f"  Saved {len(data)} examples to {output_file}")
+        paths[split] = str(output_file)
+
+    return paths
+
+
+def _download_gpqa(benchmark_dir: Path, benchmark: str, force_redownload: bool) -> dict:
+    """Download Idavidrein/gpqa dataset (main, diamond, or extended)."""
+    config_map = {
+        "gpqa": "gpqa_main",
+        "gpqa-diamond": "gpqa_diamond",
+        "gpqa-extended": "gpqa_extended",
+    }
+    hf_config = config_map[benchmark]
+    paths = {}
+
+    output_file = benchmark_dir / "test.json"
+
+    if output_file.exists() and not force_redownload:
+        print(f"  test already exists: {output_file}")
+        paths["test"] = str(output_file)
+        return paths
+
+    print(f"  Downloading {hf_config} split...")
+    dataset = load_dataset("Idavidrein/gpqa", hf_config, split="train", trust_remote_code=True)
+
+    data = []
+    for idx, item in enumerate(tqdm(dataset, desc="  Processing")):
+        data.append({
+            "question": item["Question"],
+            "correct_answer": item["Correct Answer"],
+            "incorrect_answer_1": item["Incorrect Answer 1"],
+            "incorrect_answer_2": item["Incorrect Answer 2"],
+            "incorrect_answer_3": item["Incorrect Answer 3"],
+            "idx": idx
+        })
+
+    with open(output_file, 'w') as f:
+        json.dump(data, f, indent=2)
+
+    print(f"  Saved {len(data)} examples to {output_file}")
+    paths["test"] = str(output_file)
+
+    return paths
+
+
 def get_benchmark_stats(data_dir: str = "./data") -> dict:
     """Get statistics about downloaded benchmarks."""
     data_path = Path(data_dir).expanduser()
     stats = {}
-    
-    for benchmark in ["gsm8k", "gsm-symbolic", "mmlu"]:
+
+    for benchmark in ["gsm8k", "gsm-symbolic", "mmlu", "math", "gpqa", "gpqa-diamond", "gpqa-extended"]:
         benchmark_dir = data_path / benchmark
         if not benchmark_dir.exists():
             stats[benchmark] = {"status": "not downloaded"}
@@ -577,7 +656,7 @@ if __name__ == "__main__":
         "--benchmarks",
         type=str,
         nargs="+",
-        choices=["gsm8k", "gsm-symbolic", "mmlu", "all"],
+        choices=["gsm8k", "gsm-symbolic", "mmlu", "math", "gpqa", "gpqa-diamond", "gpqa-extended", "all"],
         default=["all"],
         help="Benchmarks to download (default: all)"
     )
