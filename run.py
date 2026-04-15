@@ -139,10 +139,11 @@ def setup_model(model_name: str):
 
 def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, random_seed: int = None) -> List[Dict[str, str]]:
     """
-    Load benchmark dataset (GSM8K, GSM-Symbolic, or MMLU).
+    Load benchmark dataset (GSM8K, GSM-Symbolic, MMLU, MATH, or GPQA).
 
     Args:
-        benchmark: One of "gsm8k", "gsm-symbolic", or "mmlu"
+        benchmark: One of "gsm8k", "gsm-symbolic", "mmlu", "math", "gpqa",
+                   "gpqa-diamond", or "gpqa-extended"
         num_questions: Number of questions to load (None = all)
         random_seed: Seed for random sampling (None = no randomization, uses first N)
 
@@ -157,13 +158,25 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
         dataset = load_dataset("apple/gsm-symbolic", split="test", trust_remote_code=True)
     elif benchmark == "mmlu":
         dataset = load_dataset("cais/mmlu", "all", split="test", trust_remote_code=True)
+    elif benchmark == "math":
+        dataset = load_dataset("nlile/hendrycks-MATH-benchmark", split="test")
+    elif benchmark in ("gpqa", "gpqa-diamond", "gpqa-extended"):
+        config_map = {
+            "gpqa": "gpqa_main",
+            "gpqa-diamond": "gpqa_diamond",
+            "gpqa-extended": "gpqa_extended",
+        }
+        dataset = load_dataset("Idavidrein/gpqa", config_map[benchmark], split="train", trust_remote_code=True)
     else:
-        raise ValueError(f"Unknown benchmark: {benchmark}. Must be one of: gsm8k, gsm-symbolic, mmlu")
+        raise ValueError(
+            f"Unknown benchmark: {benchmark}. "
+            "Must be one of: gsm8k, gsm-symbolic, mmlu, math, gpqa, gpqa-diamond, gpqa-extended"
+        )
 
     # Determine which indices to use
     total = len(dataset)
     n = min(num_questions or total, total)
-    
+
     if random_seed is not None:
         random.seed(random_seed)
         indices = random.sample(range(total), n)
@@ -177,7 +190,7 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
 
     for i in tqdm(indices, desc="Loading questions", leave=False):
         item = dataset[i]
-        
+
         if benchmark in ("gsm8k", "gsm-symbolic"):
             questions.append({
                 "question": item["question"],
@@ -185,7 +198,7 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
                 "question_id": i,
                 "benchmark": benchmark
             })
-        else:  # mmlu
+        elif benchmark == "mmlu":
             choices_text = "\n".join([f"{chr(65+j)}. {choice}" for j, choice in enumerate(item["choices"])])
             formatted_question = f"{item['question']}\n\n{choices_text}"
             correct_answer = answer_mapping[item["answer"]]
@@ -198,13 +211,67 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
                 "choices": item["choices"],
                 "correct_choice_idx": item["answer"]
             })
+        elif benchmark == "math":
+            questions.append({
+                "question": item["problem"],
+                "answer": f"#### {item['answer']}",
+                "question_id": i,
+                "benchmark": "math",
+                "level": item.get("level", ""),
+                "subject": item.get("subject", "")
+            })
+        else:  # gpqa variants
+            # Shuffle the four options with a per-question seed for reproducibility
+            options = [
+                item["Correct Answer"],
+                item["Incorrect Answer 1"],
+                item["Incorrect Answer 2"],
+                item["Incorrect Answer 3"],
+            ]
+            rng = random.Random((random_seed or 0) + i)
+            rng.shuffle(options)
+            correct_idx = options.index(item["Correct Answer"])
+            choices_text = "\n".join([f"{chr(65+j)}. {opt}" for j, opt in enumerate(options)])
+            questions.append({
+                "question": f"{item['Question']}\n\n{choices_text}",
+                "answer": f"#### {chr(65 + correct_idx)}",
+                "question_id": i,
+                "benchmark": benchmark,
+                "choices": options,
+                "correct_choice_idx": correct_idx
+            })
 
     print(f"Loaded {len(questions)} questions from {benchmark.upper()}")
     return questions
 
 
+def normalize_math_answer(answer: str) -> str:
+    """Normalize a LaTeX math answer string for comparison."""
+    answer = answer.strip().strip('$').strip()
+    answer = re.sub(r'\\left', '', answer)
+    answer = re.sub(r'\\right', '', answer)
+    answer = re.sub(r'\s+', ' ', answer).strip()
+    return answer
+
+
+def answers_match(predicted: str, expected: str, benchmark: str) -> bool:
+    """Check if predicted and expected answers match, with benchmark-specific logic."""
+    if predicted == expected:
+        return True
+    if benchmark == "math":
+        # Try numeric comparison to catch equivalent float/fraction representations
+        # (e.g. "0.75" == "\frac{3}{4}" after the model outputs a decimal)
+        try:
+            pred_val = float(predicted.replace(',', ''))
+            exp_val = float(expected.replace(',', ''))
+            return abs(pred_val - exp_val) < 1e-6
+        except ValueError:
+            pass
+    return False
+
+
 def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
-    if benchmark == "mmlu":
+    if benchmark in ("mmlu", "gpqa", "gpqa-diamond", "gpqa-extended"):
         patterns = [
             r'####\s*([A-D])',
             r'[Tt]he answer is\s*([A-D])',
@@ -235,9 +302,50 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
 
         return "NO_ANSWER_FOUND"
 
+    elif benchmark == "math":
+        # Extract content from \boxed{...}, handling nested braces
+        boxed_match = re.search(r'\\boxed\{', text)
+        if boxed_match:
+            start = boxed_match.end()
+            depth = 1
+            pos = start
+            while pos < len(text) and depth > 0:
+                if text[pos] == '{':
+                    depth += 1
+                elif text[pos] == '}':
+                    depth -= 1
+                pos += 1
+            if depth == 0:
+                return normalize_math_answer(text[start:pos - 1])
+
+        # Fallback patterns
+        for pattern in [r'####\s*(.+?)(?:\n|$)', r'[Tt]he answer is[:\s]+(.+?)(?:\n|\.|$)', r'[Ff]inal answer[:\s]+(.+?)(?:\n|\.|$)']:
+            match = re.search(pattern, text)
+            if match:
+                return normalize_math_answer(match.group(1).strip())
+
+        return "NO_ANSWER_FOUND"
+
     else:
         def clean_number(num_str: str) -> str:
             return num_str.replace(',', '').replace('$', '').strip()
+
+        # TODO: Qwen3-specific answer extraction
+        # Qwen3 models wrap answers in bold markdown (**$X**) and emit <think>...</think>
+        # blocks with intermediate calculations that interfere with the last-number fallback.
+        # To enable, add `model_name: str = ""` to the function signature, pass it through
+        # from the call sites, and uncomment the block below:
+        #
+        # search_text = text
+        # if model_name and "qwen3" in model_name.lower():
+        #     search_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        #     if not search_text:
+        #         search_text = text  # nothing outside think block, fall back to full text
+        #
+        # Then replace `text` with `search_text` in the patterns loop and fallback below,
+        # and add these two patterns to the list (bold-markdown variants):
+        #     r'[Tt]he final answer is:?\s*\*{0,2}\$?\*{0,2}\s*([\d,]+)',
+        #     r'\*\*\$?([\d,]+)\*\*\s*[.,]?\s*$',
 
         patterns = [
             r'\\boxed\{([\d,]+)\}',
@@ -265,8 +373,10 @@ def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
 def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_latent_id: int, model_name: str = "", benchmark: str = "gsm8k"):
     """Create input for Coconut model with latent reasoning markers."""
     
-    if benchmark == "mmlu":
+    if benchmark in ("mmlu", "gpqa", "gpqa-diamond", "gpqa-extended"):
         instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer as 'The answer is X' where X is A, B, C, or D."
+    elif benchmark == "math":
+        instruction = f"{question}\n\nPlease solve this step by step. At the end, clearly state your final answer using \\boxed{{}} notation."
     else:
         instruction = f"{question}\n\nPlease solve this step by step."
     
@@ -281,6 +391,8 @@ def create_coconut_input(tokenizer, question: str, start_latent_id: int, end_lat
         return_tensors='pt',
         add_special_tokens=True
     )
+    if hasattr(question_ids, 'input_ids'):
+        question_ids = question_ids.input_ids
 
     if "gpt-oss" in model_name:
         # Model expects: <|start|>assistant<|channel|>...<|message|>
@@ -351,6 +463,9 @@ def test_question_with_branching(
     device: str,
     noise_type: str,
     noise_direction: str,
+    noise_schedule: str = "none",
+    lambda_decay: float = 0.5,
+    noise_at_step: int = 1,
     benchmark: str = "gsm8k",
     model_name: str = ""
 ) -> Dict[str, Any]:
@@ -364,7 +479,7 @@ def test_question_with_branching(
 
     with torch.no_grad():
         try:
-            all_branches = coconut_model.generate_with_branching(
+            generation_output = coconut_model.generate_with_branching(
                 input_ids=input_ids,
                 attention_mask=torch.ones_like(input_ids),
                 max_new_tokens=max_new_tokens,
@@ -374,8 +489,19 @@ def test_question_with_branching(
                 noise_scale=noise_scale,
                 noise_type=noise_type,
                 noise_direction=noise_direction,
-                model_name=model_name
+                noise_schedule=noise_schedule,
+                lambda_decay=lambda_decay,
+                noise_at_step=noise_at_step,
+                model_name=model_name,
+                return_diversity_metrics=True
             )
+
+            all_branches, diversity_metrics = generation_output
+            d_k_mean = diversity_metrics["D_K"]["d_k_mean"]
+            d_k_late = diversity_metrics["D_K"]["d_k_late"]
+            d_k_normalized = diversity_metrics["D_K"]["d_k_normalized"]
+            d_k_pairwise = diversity_metrics["D_K"]["d_k_pairwise"]
+            d_k_pair_labels = diversity_metrics["D_K"]["pair_labels"]
 
             branch_texts = []
             branch_answers = []
@@ -402,6 +528,11 @@ def test_question_with_branching(
                 "majority_answer": majority_answer,
                 "vote_distribution": vote_distribution,
                 "num_branches": num_branches,
+                "d_k": d_k_mean,
+                "d_k_late": d_k_late,
+                "d_k_normalized": d_k_normalized,
+                "d_k_pairwise": d_k_pairwise,
+                "d_k_pair_labels": d_k_pair_labels,
                 "error": None
             }
 
@@ -531,12 +662,15 @@ def run_quick_test(cfg: DictConfig):
                     device=device,
                     noise_type=cfg.noise.type,
                     noise_direction=cfg.noise.direction,
+                    noise_schedule=cfg.noise.get("schedule", "none"),
+                    lambda_decay=cfg.noise.get("lambda_decay", 0.5),
+                    noise_at_step=cfg.noise.get("injection_step", 1),
                     benchmark=cfg.benchmark,
                     model_name=cfg.model.name
                 )
 
                 if result["success"]:
-                    is_correct = result["majority_answer"] == expected_answer
+                    is_correct = answers_match(result["majority_answer"], expected_answer, cfg.benchmark)
 
                     question_results["noise_tests"].append({
                         "noise_scale": noise_scale,
@@ -546,7 +680,12 @@ def run_quick_test(cfg: DictConfig):
                         "vote_distribution": result["vote_distribution"],
                         "expected_answer": expected_answer,
                         "is_correct": is_correct,
-                        "num_branches": result["num_branches"]
+                        "num_branches": result["num_branches"],
+                        "d_k": result["d_k"],
+                        "d_k_late": result["d_k_late"],
+                        "d_k_normalized": result["d_k_normalized"],
+                        "d_k_pairwise": result["d_k_pairwise"],
+                        "d_k_pair_labels": result["d_k_pair_labels"]
                     })
                 else:
                     question_results["noise_tests"].append({
@@ -576,20 +715,24 @@ def run_quick_test(cfg: DictConfig):
 
     total_correct = {scale: 0 for scale in cfg.noise.scales}
     total_count = {scale: 0 for scale in cfg.noise.scales}
+    total_d_k = {scale: 0.0 for scale in cfg.noise.scales}
 
     for q_result in results:
         for test in q_result["noise_tests"]:
             noise = test.get("noise_scale")
-            if noise is not None and "is_correct" in test:
+            if noise is not None and noise in total_count and "is_correct" in test:
                 total_count[noise] += 1
                 if test["is_correct"]:
                     total_correct[noise] += 1
+                if "d_k" in test:
+                    total_d_k[noise] += test["d_k"]
 
-    print("\nAccuracy by noise scale:")
+    print("\nAccuracy and path diversity by noise scale:")
     for noise_scale in cfg.noise.scales:
         if total_count[noise_scale] > 0:
             acc = total_correct[noise_scale] / total_count[noise_scale] * 100
-            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({acc:.2f}%)")
+            mean_dk = total_d_k[noise_scale] / total_count[noise_scale]
+            print(f"  Noise={noise_scale}: {total_correct[noise_scale]}/{total_count[noise_scale]} ({acc:.2f}%), mean D_K={mean_dk:.4f}")
 
     # Save final results
     results_dir = get_results_dir(cfg)
@@ -606,7 +749,8 @@ def run_quick_test(cfg: DictConfig):
                     str(scale): {
                         "correct": total_correct[scale],
                         "total": total_count[scale],
-                        "accuracy": total_correct[scale] / total_count[scale] if total_count[scale] > 0 else 0
+                        "accuracy": total_correct[scale] / total_count[scale] if total_count[scale] > 0 else 0,
+                        "mean_d_k": total_d_k[scale] / total_count[scale] if total_count[scale] > 0 else 0
                     }
                     for scale in cfg.noise.scales
                 }
