@@ -17,9 +17,21 @@ NoisyCoconut is a training-free inference-time method that enhances large langua
 
 ## How It Works
 
-1. **Noise Injection**: Sample random noise from a configurable distribution and inject it into the last hidden layer during latent reasoning passes
-2. **Path Generation**: Create K diverse reasoning paths from a common initial state via branching
-3. **Output Aggregation**: Use majority voting to produce a consensus output or abstain when paths disagree
+1. **Shared Forward Pass**: Run the LLM forward pass on the input to produce an initial hidden state h_0.
+2. **Per-Branch Noise Injection**: Draw K independent noise vectors eta_1, ..., eta_K ~ N(0, sigma^2 * I) and add each to h_0, producing K distinct perturbed hidden states h_0^(i) = h_0 + eta_i (Eq. 1). Each branch receives its own unique perturbation — this is what causes paths to diverge.
+3. **Latent Reasoning**: For each of the K perturbed variants, run the remaining T latent reasoning steps through the model's hidden states (Eq. 1–4).
+4. **Path Diversity**: Pairwise trajectory diversity D_K (Eq. 5) measures how much the K paths diverged. Higher D_K indicates the paths explored meaningfully different regions of the solution space.
+5. **Output Aggregation**: Decode each of the K paths autoregressively, then use majority voting to produce a consensus answer or abstain when agreement is insufficient (Eq. 6).
+
+### Path Diversity Metric (D_K)
+
+D_K quantifies how distinct the K reasoning trajectories are:
+
+```
+D_K = (2 / K(K-1)) * sum_{i<j} (1/T) * sum_{t=0}^{T-1} ||h_t^(i) - h_t^(j)||_2
+```
+
+A value of 0.0 means all branches collapsed to identical paths (no diversity). Higher values indicate the noise successfully induced genuinely different reasoning trajectories, which is required for agreement-based confidence estimation to be meaningful.
 
 ## Installation
 
