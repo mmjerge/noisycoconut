@@ -2,6 +2,7 @@
 # All rights reserved.
 
 from typing import List, Tuple, Optional, Union, Literal
+import math
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
@@ -148,6 +149,192 @@ def apply_noise_to_hidden_states(
     noise_info["norm_change_ratio"] = perturbed_norm / (original_norm + 1e-8)
 
     return perturbed, noise_info
+
+
+def compute_decay_noise_scale(
+    sigma_0: float,
+    step: int,
+    total_steps: int,
+    schedule: str,
+    hidden_state: Optional[torch.Tensor] = None,
+    ewma_norm: Optional[float] = None,
+    lambda_decay: float = 0.5,
+) -> float:
+    """
+    Compute noise scale σ_t at a given latent step under a named decay schedule.
+
+    Schedules (all reduce to σ_0 at step=0):
+        "constant"    : σ_t = σ_0                                    (no decay)
+        "linear"      : σ_t = σ_0 * (1 - t / T)                     (linear decay to 0)
+        "exponential" : σ_t = σ_0 * exp(-λ * t)                     (Equation 2)
+        "cosine"      : σ_t = σ_0 * 0.5 * (1 + cos(π * t / T))     (cosine annealing)
+        "adaptive"    : σ_t = σ_0 * exp(-λ * t) * (||h_t|| / μ_t)  (Equation 4)
+
+    Args:
+        sigma_0: Base noise scale σ_0.
+        step: Current latent step index t (0-based, relative to branching point).
+        total_steps: Total number of post-branching latent steps T.
+        schedule: Schedule name (see above).
+        hidden_state: Hidden state tensor at step t; shape (hidden_dim,). Required for "adaptive".
+        ewma_norm: Running EWMA of hidden state norms μ_t. Required for "adaptive".
+        lambda_decay: Decay rate λ for "exponential" and "adaptive" schedules.
+
+    Returns:
+        Scalar noise scale for this step.
+    """
+    if schedule == "constant":
+        return sigma_0
+    elif schedule == "linear":
+        if total_steps <= 1:
+            return sigma_0
+        return sigma_0 * max(0.0, 1.0 - step / total_steps)
+    elif schedule == "exponential":
+        return sigma_0 * math.exp(-lambda_decay * step)
+    elif schedule == "cosine":
+        if total_steps <= 1:
+            return sigma_0
+        return sigma_0 * 0.5 * (1.0 + math.cos(math.pi * step / total_steps))
+    elif schedule == "adaptive":
+        exp_factor = math.exp(-lambda_decay * step)
+        if hidden_state is not None and ewma_norm is not None and ewma_norm > 1e-8:
+            ht_norm = torch.norm(hidden_state).item()
+            return sigma_0 * exp_factor * (ht_norm / ewma_norm)
+        return sigma_0 * exp_factor
+    else:
+        raise ValueError(
+            f"Unknown noise schedule '{schedule}'. "
+            "Choose from: constant, linear, exponential, cosine, adaptive."
+        )
+
+
+def compute_decay_noise_scale(
+    sigma_0: float,
+    step: int,
+    total_steps: int,
+    schedule: str,
+    hidden_state: Optional[torch.Tensor] = None,
+    ewma_norm: Optional[float] = None,
+    lambda_decay: float = 0.5,
+) -> float:
+    """
+    Compute noise scale σ_t at a given post-branching latent step.
+
+    Schedules:
+        "none"        : no per-step noise (original single-injection behaviour)
+        "constant"    : σ_t = σ_0
+        "linear"      : σ_t = σ_0 * (1 - t / T)
+        "cosine"      : σ_t = σ_0 * 0.5 * (1 + cos(π * t / T))
+        "exponential" : σ_t = σ_0 * exp(-λ * t)           [Equation 2]
+        "adaptive"    : σ_t = σ_0 * exp(-λ * t) * (||h_t|| / μ_t)  [Equation 4]
+
+    Args:
+        sigma_0: Base noise scale σ_0.
+        step: Current step index t (0-based, relative to the branching point).
+        total_steps: Total number of post-branching latent steps T.
+        schedule: One of the schedule names listed above.
+        hidden_state: Current hidden state tensor (hidden_dim,); required for "adaptive".
+        ewma_norm: Running EWMA of hidden-state norms μ_t; required for "adaptive".
+        lambda_decay: Exponential decay rate λ for "exponential" and "adaptive".
+
+    Returns:
+        Noise scale for this step (0.0 if schedule is "none").
+    """
+    if schedule == "none":
+        return 0.0
+    elif schedule == "constant":
+        return sigma_0
+    elif schedule == "linear":
+        if total_steps <= 1:
+            return sigma_0
+        return sigma_0 * max(0.0, 1.0 - step / total_steps)
+    elif schedule == "cosine":
+        if total_steps <= 1:
+            return sigma_0
+        return sigma_0 * 0.5 * (1.0 + math.cos(math.pi * step / total_steps))
+    elif schedule == "exponential":
+        return sigma_0 * math.exp(-lambda_decay * step)
+    elif schedule == "adaptive":
+        exp_factor = math.exp(-lambda_decay * step)
+        if hidden_state is not None and ewma_norm is not None and ewma_norm > 1e-8:
+            ht_norm = torch.norm(hidden_state).item()
+            return sigma_0 * exp_factor * (ht_norm / ewma_norm)
+        return sigma_0 * exp_factor
+    else:
+        raise ValueError(
+            f"Unknown noise_schedule '{schedule}'. "
+            "Choose from: none, constant, linear, cosine, exponential, adaptive."
+        )
+
+
+def compute_path_diversity(trajectories: List[List[torch.Tensor]], late_step_fraction: float = 0.5) -> dict:
+    """
+    Compute pairwise trajectory diversity D_K as defined in Equation 5.
+
+    D_K = (2 / K(K-1)) * sum_{i<j} (1/T) * sum_{t=0}^{T-1} ||h_t^(i) - h_t^(j)||_2
+
+    Also computes:
+      - d_k_late: D_K restricted to the final (late_step_fraction * T) steps, where
+                  attractor convergence should be visible if it exists.
+      - d_k_normalized: D_K divided by the mean hidden state norm across all branches
+                        and steps, making D_K dimensionless and removing the ||h|| scale
+                        effect introduced by gaussian_scaled noise.
+
+    Args:
+        trajectories:       List of K trajectories. Each trajectory is a list of T tensors
+                            of shape (hidden_dim,), one per latent reasoning step.
+        late_step_fraction: Fraction of steps (from the end) to use for d_k_late. Default 0.5.
+    Returns:
+        dict with:
+            "d_k_mean":      scalar mean D_K across all pairs (float)
+            "d_k_late":      D_K computed over the last (late_step_fraction * T) steps (float)
+            "d_k_normalized": D_K normalized by mean hidden state norm (float)
+            "d_k_pairwise":  per-pair mean distances over all steps (List[float])
+            "pair_labels":   "(i,j)" string for each pairwise entry (List[str])
+    """
+    K = len(trajectories)
+    if K < 2:
+        return {"d_k_mean": 0.0, "d_k_late": 0.0, "d_k_normalized": 0.0, "d_k_pairwise": [], "pair_labels": []}
+    T = len(trajectories[0])
+    if T == 0:
+        return {"d_k_mean": 0.0, "d_k_late": 0.0, "d_k_normalized": 0.0, "d_k_pairwise": [], "pair_labels": []}
+
+    late_start = max(1, int(T * (1.0 - late_step_fraction)))
+
+    pairwise_full = []
+    pairwise_late = []
+    pair_labels = []
+    for i in range(K):
+        for j in range(i + 1, K):
+            full_dist = sum(
+                torch.norm(trajectories[i][t] - trajectories[j][t]).item()
+                for t in range(T)
+            ) / T
+            late_dist = sum(
+                torch.norm(trajectories[i][t] - trajectories[j][t]).item()
+                for t in range(late_start, T)
+            ) / (T - late_start)
+            pairwise_full.append(full_dist)
+            pairwise_late.append(late_dist)
+            pair_labels.append(f"({i},{j})")
+
+    d_k_mean = (2.0 / (K * (K - 1))) * sum(pairwise_full)
+    d_k_late = (2.0 / (K * (K - 1))) * sum(pairwise_late)
+
+    # Mean hidden state norm across all branches and steps
+    mean_hidden_norm = sum(
+        torch.norm(trajectories[i][t]).item()
+        for i in range(K)
+        for t in range(T)
+    ) / (K * T)
+    d_k_normalized = d_k_mean / mean_hidden_norm if mean_hidden_norm > 0 else 0.0
+
+    return {
+        "d_k_mean": d_k_mean,
+        "d_k_late": d_k_late,
+        "d_k_normalized": d_k_normalized,
+        "d_k_pairwise": pairwise_full,
+        "pair_labels": pair_labels,
+    }
 
 
 class Coconut(nn.Module):
@@ -485,9 +672,12 @@ class Coconut(nn.Module):
         noise_type: str = "gaussian",
         noise_direction: Optional[str] = None,
         noise_at_step: int = 1,
+        noise_schedule: str = "none",
+        lambda_decay: float = 0.5,
         model_name: str = "",
+        return_diversity_metrics: bool = False,
         **kwargs
-    ) -> List[torch.Tensor]:
+    ) -> Union[List[torch.Tensor], Tuple[List[torch.Tensor], dict]]:
         """
         Generate N diverse sequences by branching after a specified noisy latent pass.
         
@@ -537,7 +727,11 @@ class Coconut(nn.Module):
             print(f"  [gpt-oss: sequence length {first_latent_pos} >= {SLIDING_WINDOW_SIZE}, disabling KV cache]")
 
         print(f"Step 1: Running latent passes 1-{noise_at_step} (pre-branch)...")
-        
+
+        # Collect hidden state at each latent step for D_K computation.
+        # shared_trajectory holds steps 0..noise_at_step-1 (identical across all branches).
+        shared_trajectory: List[torch.Tensor] = []
+
         inputs_embeds = self.embedding(input_ids)
         
         for pass_idx in range(noise_at_step):
@@ -607,30 +801,49 @@ class Coconut(nn.Module):
 
             hidden_states = outputs.hidden_states[self.hidden_layer_idx]
             
-            # Apply noise at the specified step
-            if pass_idx == noise_at_step - 1 and noise_scale > 0.0:
-                hidden_states, noise_info = apply_noise_to_hidden_states(
-                    hidden_states, noise_scale, noise_type, noise_direction
-                )
-                print(f"  Applied noise at step {noise_at_step}: {noise_info['noise_type']}, scale={noise_scale}")
-
-            # Fill latent position with hidden state
+            # Fill the latent position with the clean hidden state.
+            # Noise is applied independently per branch below (Step 2 of the algorithm),
+            # not here, so that each branch receives a distinct perturbation eta_i ~ N(0, sigma^2 I).
             inputs_embeds[0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
+            shared_trajectory.append(hidden_states[0, -1, :].detach().clone())
 
         print(f"Step 2: Branching into {num_branches} paths for remaining {max_n_latents - noise_at_step} latent passes...")
-        
+
+        # h_0: the clean hidden state at the branching point, shared across all branches
+        # before noise injection.
+        pre_branch_hidden = shared_trajectory[-1].clone() if shared_trajectory else None
+
         all_branches = []
         for branch_idx in range(num_branches):
             branch_data = {
                 'inputs_embeds': inputs_embeds.clone(),
-                'tokens': input_ids[0].detach().tolist()
+                'tokens': input_ids[0].detach().tolist(),
+                'trajectory': [h.clone() for h in shared_trajectory],
             }
+            # Draw a fresh eta_i ~ N(0, sigma^2 I) for this branch and inject it into
+            # h_0, producing h_0^(i) = h_0 + eta_i (Eq. 1).  Because each branch gets
+            # an independently sampled eta, the K paths diverge during the remaining
+            # latent reasoning steps, yielding a non-zero D_K (Eq. 5).
+            if noise_scale > 0.0 and pre_branch_hidden is not None:
+                noisy_h, _ = apply_noise_to_hidden_states(
+                    pre_branch_hidden.unsqueeze(0).unsqueeze(0),
+                    noise_scale, noise_type, noise_direction
+                )
+                noisy_h = noisy_h[0, 0]
+                branch_data['inputs_embeds'][0, latent_positions[noise_at_step - 1], :] = noisy_h
+                branch_data['trajectory'][-1] = noisy_h.detach().clone()
             all_branches.append(branch_data)
 
+        # Total post-branching steps; used to normalise linear/cosine schedules.
+        post_branch_steps = max_n_latents - noise_at_step
+
         for pass_idx in range(noise_at_step, max_n_latents):
+            # Step index relative to the branching point (0 = first post-branch pass).
+            decay_step = pass_idx - noise_at_step
+
             for branch_idx, branch in enumerate(all_branches):
                 end_pos = latent_positions[pass_idx]
-                
+
                 # Always recompute full sequence for gpt-oss (due to sliding window)
                 # For other models, could optimize with KV cache
                 outputs = self.base_causallm(
@@ -642,7 +855,34 @@ class Coconut(nn.Module):
                 )
 
                 hidden_states = outputs.hidden_states[self.hidden_layer_idx]
-                branch['inputs_embeds'][0, latent_positions[pass_idx], :] = hidden_states[0, -1, :]
+                h_last = hidden_states[0, -1, :]
+
+                # Optionally apply per-step decaying noise (ablation schedules).
+                # When noise_schedule="none" (default) this block is skipped,
+                # preserving the original single-injection-at-branching-point behaviour.
+                if noise_scale > 0.0 and noise_schedule != "none":
+                    ewma = branch.get('ewma_norm')
+                    ht_norm = torch.norm(h_last).item()
+                    branch['ewma_norm'] = 0.9 * ewma + 0.1 * ht_norm if ewma is not None else ht_norm
+
+                    step_scale = compute_decay_noise_scale(
+                        sigma_0=noise_scale,
+                        step=decay_step,
+                        total_steps=post_branch_steps,
+                        schedule=noise_schedule,
+                        hidden_state=h_last,
+                        ewma_norm=branch.get('ewma_norm'),
+                        lambda_decay=lambda_decay,
+                    )
+                    if step_scale > 0.0:
+                        h_noisy, _ = apply_noise_to_hidden_states(
+                            h_last.unsqueeze(0).unsqueeze(0),
+                            step_scale, noise_type, noise_direction,
+                        )
+                        h_last = h_noisy[0, 0]
+
+                branch['inputs_embeds'][0, latent_positions[pass_idx], :] = h_last
+                branch['trajectory'].append(h_last.detach().clone())
 
         print(f"Step 3: Final pass and autoregressive generation for each branch...")
 
@@ -704,6 +944,12 @@ class Coconut(nn.Module):
             print(f"{len(branch['tokens']) - input_ids.shape[1]} new tokens")
 
         print(f"=== Completed {num_branches} branches ===\n")
+
+        if return_diversity_metrics:
+            trajectories = [branch['trajectory'] for branch in all_branches]
+            d_k = compute_path_diversity(trajectories)
+            return all_generated_sequences, {"D_K": d_k, "trajectories": trajectories}
+
         return all_generated_sequences
 
     def _clone_kv_cache(self, kv_cache):
