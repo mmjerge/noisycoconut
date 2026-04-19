@@ -34,6 +34,7 @@ from tqdm import tqdm
 
 # High precision setup
 _PREC = 100
+RAW_LOG_PROB_PRECISION = 40
 mpmath.mp.dps = _PREC          # decimal places for mpmath
 getcontext().prec = _PREC + 10  # a few guard digits for Decimal arithmetic
 
@@ -236,7 +237,7 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
                 "correct_choice_idx": item["answer"]
             })
 
-        return questions
+    return questions
 
 
 def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
@@ -493,7 +494,7 @@ def test_question_with_branching(
             branch_log_probs = []  
             branch_log_prob_stats = [] 
 
-            for branch_ids, token_log_probs in all_branches:
+            for branch_idx, (branch_ids, token_log_probs) in enumerate(all_branches):
                 branch_text = extract_generated_only(
                     tokenizer,
                     branch_ids,
@@ -511,13 +512,23 @@ def test_question_with_branching(
                     hp_sum_lp  = _hp_sum(token_log_probs)
                     hp_min_lp  = min(Decimal(str(v)) for v in token_log_probs)
                     hp_max_lp  = max(Decimal(str(v)) for v in token_log_probs)
+
+                    # Full 40-decimal-place raw log-probs
+                    raw_strs = [
+                        format(Decimal(str(v)), f'.{RAW_LOG_PROB_PRECISION}f').rstrip('0').rstrip('.') 
+                        for v in token_log_probs
+                    ]
+
                     branch_log_prob_stats.append({
+                        "branch_index": branch_idx,
+                        "branch_answer": branch_answer,
+                        #"branch_weight": test.get("branch_weights", [])[branch_idx] if branch_idx < len(test.get("branch_weights", [])) else None,
+                        "num_tokens": len(token_log_probs),
                         "mean_log_prob": _dec_to_str(hp_mean_lp),
-                        "sum_log_prob":  _dec_to_str(hp_sum_lp),
-                        "num_tokens":    len(token_log_probs),
-                        "min_log_prob":  _dec_to_str(hp_min_lp),
-                        "max_log_prob":  _dec_to_str(hp_max_lp),
-                        "raw_log_probs": [_dec_to_str(Decimal(str(v))) for v in token_log_probs],
+                        "sum_log_prob": _dec_to_str(hp_sum_lp),
+                        "min_log_prob": _dec_to_str(hp_min_lp),
+                        "max_log_prob": _dec_to_str(hp_max_lp),
+                        "raw_log_probs": raw_strs,          # ← now 40 digits
                     })
                 else:
                     branch_log_prob_stats.append({
@@ -619,6 +630,8 @@ def run_quick_test(cfg: DictConfig):
         results = []
         completed_ids = set()
 
+    logits_results = []
+
     # Setup
     tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id = setup_model(cfg.model.name)
 
@@ -675,6 +688,11 @@ def run_quick_test(cfg: DictConfig):
                 "noise_tests": []
             }
 
+            question_logits = {
+                "question_id": q_data["question_id"],
+                "noise_tests": []
+            }
+
             expected_answer = extract_answer(q_data["answer"], cfg.benchmark)
 
             # Noise scale progress bar
@@ -712,7 +730,7 @@ def run_quick_test(cfg: DictConfig):
                         "noise_scale": noise_scale,
                         "branch_texts": result["branch_texts"],
                         "branch_answers": result["branch_answers"],
-                        "branch_log_prob_stats": result["branch_log_prob_stats"],
+                        #"branch_log_prob_stats": result["branch_log_prob_stats"],
                         "branch_weights": result["branch_weights"],
                         "majority_answer": result["majority_answer"],
                         "vote_distribution": result["vote_distribution"],
@@ -722,13 +740,22 @@ def run_quick_test(cfg: DictConfig):
                         "is_correct": is_correct,
                         "num_branches": result["num_branches"]
                     })
+
+                    question_logits["noise_tests"].append({
+                        "noise_scale": noise_scale,
+                        "branch_log_prob_stats": result["branch_log_prob_stats"],
+                        "majority_answer": result["majority_answer"],
+                    })
                 else:
                     question_results["noise_tests"].append({
                         "noise_scale": noise_scale,
                         "error": result["error"]
                     })
 
+                
+
             results.append(question_results)
+            logits_results.append(question_logits)
             completed_ids.add(q_data["question_id"])
 
             # Checkpoint every N questions
@@ -797,33 +824,18 @@ def run_quick_test(cfg: DictConfig):
     logits_output_file = results_dir / f"logits_{cfg.benchmark}_{model_name_safe}_{timestamp}.json"
 
     logits_records = []
-    for q_result in results:
+    for q_result in logits_results:
         q_logits_entry = {
             "question_id": q_result["question_id"],
             "noise_tests": []
         }
         for test in q_result.get("noise_tests", []):
-            if "error" in test and "branch_log_prob_stats" not in test:
-                q_logits_entry["noise_tests"].append({
-                    "noise_scale": test.get("noise_scale"),
-                    "error": test.get("error")
-                })
-                continue
-
             branch_logits_list = []
             for branch_idx, stats in enumerate(test.get("branch_log_prob_stats", [])):
                 branch_logits_list.append({
-                    "branch_index": branch_idx,
-                    "branch_answer": (
-                        test["branch_answers"][branch_idx]
-                        if branch_idx < len(test.get("branch_answers", []))
-                        else None
-                    ),
-                    "branch_weight": (
-                        test["branch_weights"][branch_idx]
-                        if branch_idx < len(test.get("branch_weights", []))
-                        else None
-                    ),
+                    "branch_index":  branch_idx,
+                    "branch_answer": stats.get("branch_answer"),
+                    "branch_weight": stats.get("branch_weight"),
                     "num_tokens":    stats.get("num_tokens"),
                     "mean_log_prob": stats.get("mean_log_prob"),
                     "sum_log_prob":  stats.get("sum_log_prob"),
@@ -831,13 +843,11 @@ def run_quick_test(cfg: DictConfig):
                     "max_log_prob":  stats.get("max_log_prob"),
                     "raw_log_probs": stats.get("raw_log_probs", []),
                 })
-
             q_logits_entry["noise_tests"].append({
                 "noise_scale":     test.get("noise_scale"),
                 "majority_answer": test.get("majority_answer"),
                 "branches":        branch_logits_list,
             })
-
         logits_records.append(q_logits_entry)
 
     with open(logits_output_file, 'w') as f:
