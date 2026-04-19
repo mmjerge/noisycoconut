@@ -667,7 +667,7 @@ class Coconut(nn.Module):
             )
 
             # Sample first token
-            raw_logits = outputs.logits[0, -1]
+            raw_logits = outputs.logits[0, -1].to(torch.float64)
             log_probs_full = torch.log_softmax(raw_logits, dim=-1)
             logits = raw_logits / temperature
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
@@ -690,7 +690,7 @@ class Coconut(nn.Module):
             for _ in range(max_new_tokens - 1):
                 outputs = self.base_causallm(inputs_embeds=new_inputs_embeds)
                 
-                raw_logits = outputs.logits[0, -1]
+                raw_logits = outputs.logits[0, -1].to(torch.float64)
                 log_probs_full = torch.log_softmax(raw_logits, dim=-1)
                 logits = raw_logits / temperature
 
