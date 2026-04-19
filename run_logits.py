@@ -170,7 +170,7 @@ def setup_model(model_name: str):
     return tokenizer, base_model, latent_token_id, start_latent_id, end_latent_id, eos_token_id
 
 
-def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, random_seed: int = None) -> List[Dict[str, str]]:
+def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, random_seed: int = None, question_ids: list = None) -> List[Dict[str, str]]:    
     """
     Load benchmark dataset (GSM8K, GSM-Symbolic, or MMLU).
 
@@ -195,13 +195,17 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
 
     # Determine which indices to use
     total = len(dataset)
-    n = min(num_questions or total, total)
-    
-    if random_seed is not None:
+
+    if question_ids is not None:
+        indices = [i for i in question_ids if i < total]
+        print(f"Loading {len(indices)} specific questions by ID")
+    elif random_seed is not None:
+        n = min(num_questions or total, total)
         random.seed(random_seed)
         indices = random.sample(range(total), n)
         print(f"Randomly sampling {n} questions (seed={random_seed})")
     else:
+        n = min(num_questions or total, total)
         indices = list(range(n))
 
     # Build questions list
@@ -232,8 +236,7 @@ def load_benchmark_dataset(benchmark: str = "gsm8k", num_questions: int = None, 
                 "correct_choice_idx": item["answer"]
             })
 
-    print(f"Loaded {len(questions)} questions from {benchmark.upper()}")
-    return questions
+        return questions
 
 
 def extract_answer(text: str, benchmark: str = "gsm8k") -> str:
@@ -514,6 +517,7 @@ def test_question_with_branching(
                         "num_tokens":    len(token_log_probs),
                         "min_log_prob":  _dec_to_str(hp_min_lp),
                         "max_log_prob":  _dec_to_str(hp_max_lp),
+                        "raw_log_probs": [_dec_to_str(Decimal(str(v))) for v in token_log_probs],
                     })
                 else:
                     branch_log_prob_stats.append({
@@ -522,6 +526,7 @@ def test_question_with_branching(
                         "num_tokens":    0,
                         "min_log_prob":  None,
                         "max_log_prob":  None,
+                        "raw_log_probs": [],
                     })
 
             agg = new_aggregation_probability_based(
@@ -632,9 +637,10 @@ def run_quick_test(cfg: DictConfig):
     )
 
     questions = load_benchmark_dataset(
-        cfg.benchmark, 
-        cfg.experiment.num_questions, 
-        random_seed=cfg.experiment.random_seed
+        cfg.benchmark,
+        cfg.experiment.num_questions,
+        random_seed=cfg.experiment.random_seed,
+        question_ids=getattr(cfg.experiment, 'question_ids', None)
     )
 
     questions_to_process = [q for q in questions if q["question_id"] not in completed_ids]
