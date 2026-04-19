@@ -10,7 +10,7 @@ experiment:
   num_questions: 1000
   num_branches: 5
   random_seed: 42
-  question_ids: [100, 101, 102]
+  question_ids: null
 
 # Noise settings
 noise:
