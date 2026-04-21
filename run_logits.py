@@ -368,75 +368,58 @@ def new_aggregation_probability_based(
     branch_log_probs: Optional[List[List[float]]] = None,
     benchmark: str = "gsm8k"
 ) -> Dict[str, Any]:
-    # 04/11/2026
-    # Length-normalised log-probability aggregation
-    # All arithmetic is performed at 100 decimal digits of precision using
-    # mpmath (for exp/log) and Python's decimal module (for sums/divisions).
-    if not answers:
-        return {
-            "answer": "NO_ANSWER_FOUND",
-            "prob_distribution": {},
-            "vote_counts": {},
-            "branch_weights": []
-        }
+    if not answers or not branch_log_probs:
+        return {"answer": "NO_ANSWER_FOUND", "prob_distribution": {}, "branch_weights": []}
 
-    # compute length-normalised scores at high precision 
-    hp_scores: List[mpmath.mpf] = []
-    if branch_log_probs and len(branch_log_probs) == len(answers):
-        for log_probs in branch_log_probs:
-            if log_probs:
-                hp_mean_lp = _hp_mean(log_probs)
-                hp_scores.append(_to_mp(hp_mean_lp))
-            else:
-                hp_scores.append(_to_mp(0))
+    # sum every token generated across all branches. 
+    total_token_count = sum(len(lp) for lp in branch_log_probs if lp)
+    total_potential_mass = _to_mp(total_token_count)
+
+    if total_token_count == 0:
+        return {"answer": "NO_ANSWER_FOUND", "prob_distribution": {}, "branch_weights": []}
+
+    # Accumulate mass for every outcome
+    answer_masses: Dict[str, mpmath.mpf] = {}
+    branch_normalized_weights: List[mpmath.mpf] = []
+
+    for ans, log_probs in zip(answers, branch_log_probs):
+        if log_probs:
+            raw_probs = [_mp_exp(lp) for lp in log_probs]
+            branch_total_mass = sum(raw_probs)
+            
+            # Map mass to answer string
+            answer_masses[ans] = answer_masses.get(ans, _to_mp(0)) + branch_total_mass
+            
+            # weight is used for plotting
+            branch_normalized_weights.append(branch_total_mass / total_potential_mass)
+        else:
+            branch_normalized_weights.append(_to_mp(0))
+
+    # Calculate probability distribution relative to GLOBAL pool
+    # Values reflect true model certainty
+    prob_distribution: Dict[str, mpmath.mpf] = {
+        ans: mass / total_potential_mass 
+        for ans, mass in answer_masses.items()
+    }
+
+    # Filter out "NO_ANSWER_FOUND"
+    # picks best real answer
+    valid_options = {
+        ans: mass for ans, mass in answer_masses.items() 
+        if ans != "NO_ANSWER_FOUND"
+    }
+    
+    if not valid_options:
+        majority_answer = "NO_ANSWER_FOUND"
     else:
-        hp_scores = [_to_mp(0)] * len(answers)
-
-    # numerically stable softmax at high precision
-    max_score: mpmath.mpf = max(hp_scores)
-    exp_scores: List[mpmath.mpf] = [_mp_exp(s - max_score) for s in hp_scores]
-    total_exp: mpmath.mpf = sum(exp_scores)
-    hp_weights: List[mpmath.mpf] = [e / total_exp for e in exp_scores]
-
-    # accumulate weighted votes 
-    if benchmark == "mmlu":
-        possible = ['A', 'B', 'C', 'D']
-    else:
-        possible = list(Counter(answers).keys())
-
-    hp_weighted_votes: Dict[str, mpmath.mpf] = {}
-    for answer, weight in zip(answers, hp_weights):
-        hp_weighted_votes[answer] = hp_weighted_votes.get(answer, _to_mp(0)) + weight
-
-    if benchmark == "mmlu":
-        for choice in possible:
-            if choice not in hp_weighted_votes:
-                hp_weighted_votes[choice] = _to_mp(0)
-
-    # normalise to probability distribution
-    total_weight: mpmath.mpf = sum(hp_weighted_votes.values())
-    if total_weight > _to_mp(0):
-        hp_prob_dist: Dict[str, mpmath.mpf] = {
-            k: v / total_weight for k, v in hp_weighted_votes.items()
-        }
-    else:
-        hp_prob_dist = {k: _to_mp(0) for k in hp_weighted_votes}
-
-    majority_answer = (
-        max(hp_prob_dist, key=hp_prob_dist.get)
-        if hp_prob_dist
-        else "NO_ANSWER_FOUND"
-    )
-
-    prob_distribution = {k: _dec_to_str(v) for k, v in hp_prob_dist.items()}
-    vote_counts       = {k: _dec_to_str(v) for k, v in hp_weighted_votes.items()}
-    branch_weights    = [_dec_to_str(w)    for w in hp_weights]
+        # Pick the valid answer that had the most mass
+        majority_answer = max(valid_options, key=valid_options.get)
 
     return {
-        "answer":            majority_answer,
-        "prob_distribution": prob_distribution,
-        "vote_counts":       vote_counts,
-        "branch_weights":    branch_weights,
+        "answer": majority_answer,
+        "prob_distribution": {k: _dec_to_str(v) for k, v in prob_distribution.items()},
+        "vote_counts": {k: _dec_to_str(v) for k, v in answer_masses.items()},
+        "branch_weights": [_dec_to_str(w) for w in branch_normalized_weights]
     }
 
 #def majority_vote(answers: List[str]) -> str:
