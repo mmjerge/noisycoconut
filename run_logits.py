@@ -1,8 +1,8 @@
 """
-Quick test script for Coconut branching with majority voting.
+Quick test script for Coconut branching with logit probability mass voting.
 
 This is a simplified version for quick testing and debugging of the branching
-and majority voting functionality. Use this to verify the system works before
+and logit probability mass voting functionality. Use this to verify the system works before
 running larger experiments.
 
 Usage:
@@ -371,7 +371,7 @@ def new_aggregation_probability_based(
     if not answers or not branch_log_probs:
         return {"answer": "NO_ANSWER_FOUND", "prob_distribution": {}, "branch_weights": []}
 
-    # sum every token generated across all branches. 
+    # Calculate global denominator (sum of all tokens generated)
     total_token_count = sum(len(lp) for lp in branch_log_probs if lp)
     total_potential_mass = _to_mp(total_token_count)
 
@@ -387,33 +387,18 @@ def new_aggregation_probability_based(
             raw_probs = [_mp_exp(lp) for lp in log_probs]
             branch_total_mass = sum(raw_probs)
             
-            # Map mass to answer string
             answer_masses[ans] = answer_masses.get(ans, _to_mp(0)) + branch_total_mass
-            
-            # weight is used for plotting
             branch_normalized_weights.append(branch_total_mass / total_potential_mass)
         else:
             branch_normalized_weights.append(_to_mp(0))
 
-    # Calculate probability distribution relative to GLOBAL pool
-    # Values reflect true model certainty
+    #Probability distribution relative to the global pool
     prob_distribution: Dict[str, mpmath.mpf] = {
         ans: mass / total_potential_mass 
         for ans, mass in answer_masses.items()
     }
 
-    # Filter out "NO_ANSWER_FOUND"
-    # picks best real answer
-    valid_options = {
-        ans: mass for ans, mass in answer_masses.items() 
-        if ans != "NO_ANSWER_FOUND"
-    }
-    
-    if not valid_options:
-        majority_answer = "NO_ANSWER_FOUND"
-    else:
-        # Pick the valid answer that had the most mass
-        majority_answer = max(valid_options, key=valid_options.get)
+    majority_answer = max(prob_distribution, key=prob_distribution.get)
 
     return {
         "answer": majority_answer,
@@ -449,7 +434,7 @@ def test_question_with_branching(
     benchmark: str = "gsm8k",
     model_name: str = ""
 ) -> Dict[str, Any]:
-    """Test a single question using branching generation with majority voting."""
+    """Test a single question using branching generation with logit probability mass voting."""
     coconut_model.eval()
 
     input_ids = create_coconut_input(tokenizer, question, start_latent_id, end_latent_id, 
@@ -496,7 +481,7 @@ def test_question_with_branching(
                     hp_min_lp  = min(Decimal(str(v)) for v in token_log_probs)
                     hp_max_lp  = max(Decimal(str(v)) for v in token_log_probs)
 
-                    # Full 40-decimal-place raw log-probs
+                    # 40-decimal-place raw log-probs
                     raw_strs = [
                         format(Decimal(str(v)), f'.{RAW_LOG_PROB_PRECISION}f').rstrip('0').rstrip('.') 
                         for v in token_log_probs
@@ -511,7 +496,7 @@ def test_question_with_branching(
                         "sum_log_prob": _dec_to_str(hp_sum_lp),
                         "min_log_prob": _dec_to_str(hp_min_lp),
                         "max_log_prob": _dec_to_str(hp_max_lp),
-                        "raw_log_probs": raw_strs,          # ← now 40 digits
+                        "raw_log_probs": raw_strs,
                     })
                 else:
                     branch_log_prob_stats.append({
@@ -581,7 +566,7 @@ def test_question_with_branching(
 
 
 def run_quick_test(cfg: DictConfig):
-    """Run a quick test of branching and majority voting."""
+    """Run a quick test of branching and logit probability mass voting."""
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -589,7 +574,7 @@ def run_quick_test(cfg: DictConfig):
     config_dict = OmegaConf.to_container(cfg, resolve=True)
 
     print("\n" + "="*70)
-    print("QUICK BRANCHING + MAJORITY VOTING TEST")
+    print("QUICK BRANCHING + LOGIT PROBABILITY MASS VOTING TEST")
     print("="*70)
     print(f"Model: {cfg.model.name}")
     print(f"Benchmark: {cfg.benchmark}")
