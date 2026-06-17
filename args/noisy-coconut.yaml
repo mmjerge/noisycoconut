@@ -1,0 +1,37 @@
+benchmark: "mmlu"  # Options: "gsm8k", "gsm-symbolic", "mmlu", "math", "gpqa", "gpqa-diamond", "gpqa-extended"
+
+# Model settings
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  max_new_tokens: 8192  # Raised from 2056 so reasoning models (Qwen3-8B etc.)
+                        # can finish long derivations instead of truncating mid-answer.
+
+# Experiment settings
+experiment:
+  num_questions: 1000
+  num_branches: 5
+  random_seed: 42
+
+# Noise settings
+noise:
+  scales: [0.2]
+  type: "gaussian_scaled"
+  direction: null  # null means no specific direction
+  schedule: "none"  # decay schedule for post-branching steps: none, linear, cosine, exponential, adaptive
+  lambda_decay: 0.5  # exponential decay rate λ (used by "exponential" and "adaptive" schedules)
+  injection_step: 1  # latent pass at which noise is injected (1–8); ablate with 1, 3, 5
+
+# Sampling parameters
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+
+# Checkpointing
+checkpoint:
+  interval: 50  # Save every N questions, so slow reasoning models (e.g. Qwen3-8B
+                # with thinking on) bank progress before the wall-clock limit and
+                # resume across resubmissions. Revisit once the O(n^2) decode is cached.
+  # File name is auto-generated based on benchmark and model
+
+# Output directory
+output_dir: "~/results"

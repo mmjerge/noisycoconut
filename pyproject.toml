@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noisycoconut"
+version = "0.1.0"
+description = "Counterfactual Consensus via Latent Space Reasoning: training-free noise-injected latent reasoning for LLMs."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Michael Jerge", email = "mj6ux@virginia.edu" }]
+keywords = ["llm", "reasoning", "latent-reasoning", "coconut", "inference-time", "self-consistency"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.5",
+    "numpy>=1.24",
+    "transformers>=4.46",
+    "datasets>=3.1",
+    "omegaconf>=2.3",
+    "tqdm>=4.67",
+    "mpmath>=1.3",
+]
+
+[project.optional-dependencies]
+logging = ["wandb>=0.18"]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/mmjerge/noisycoconut"
+Repository = "https://github.com/mmjerge/noisycoconut"
+
+# Console entry points mirror the root CLI scripts. Each script exposes a
+# main() that parses --config / CLI overrides exactly like `python <script>.py`.
+[project.scripts]
+noisycoconut-run = "run:main"
+noisycoconut-logits = "run_logits:main"
+noisycoconut-data = "data:main"
+
+[tool.setuptools]
+# The importable library lives in the noisycoconut package. The runner scripts
+# stay at the repository root (so `python run.py ...` keeps working) and are
+# shipped as top-level modules so the console entry points above resolve.
+packages = ["noisycoconut"]
+py-modules = ["run", "run_logits", "data"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
